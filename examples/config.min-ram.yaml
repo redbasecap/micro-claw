@@ -1,0 +1,33 @@
+runtime:
+  mode: remote
+  local_fallback: false
+  stream: true
+  disk_backed_memory: true
+  in_memory_retrieval: false
+  max_parallel_requests: 1
+
+provider:
+  kind: anthropic
+  model: your-provider-model-id
+  api_key_env: ANTHROPIC_API_KEY
+  request_timeout_seconds: 120
+  max_output_tokens: 4096
+
+context:
+  keep_recent_messages: 8
+  keep_full_transcript_in_memory: false
+  summarize_after_each_step: true
+  max_open_files: 6
+  max_file_chars_per_file: 24000
+
+tools:
+  shell_enabled: true
+  patch_enabled: true
+  max_command_seconds: 120
+  capture_command_output_limit: 12000
+
+policy:
+  prefer_min_ram: true
+  start_ollama_automatically: false
+  allow_remote_provider: true
+  require_explicit_opt_in_for_local_model: true
