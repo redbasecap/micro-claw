@@ -8,10 +8,24 @@ import type {
   TelegramServiceResult
 } from "../core/types.js";
 import { appendAssistantConversation, addAssistantNote, addAssistantReminder, addAssistantTodo, completeAssistantTodo, formatAssistantUserContext, getAssistantStateFiles, getAssistantUserState, listDueAssistantReminders, markAssistantReminderDelivered, touchAssistantUser } from "../assistant/store.js";
+import {
+  addAssistantScheduledTask,
+  formatAssistantScheduledTaskList,
+  listAssistantScheduledTasks,
+  listDueAssistantScheduledTasks,
+  markAssistantScheduledTaskRun,
+  removeAssistantScheduledTask
+} from "../assistant/schedule-store.js";
 import { formatReminderDate, parseReminderRequest } from "../assistant/reminder-parser.js";
+import { computeNextAssistantScheduleRun, formatAssistantSchedule, parseAssistantScheduleRequest } from "../assistant/schedule-parser.js";
+import {
+  appendAssistantWorkspaceMemory,
+  getAssistantWorkspacePaths,
+  readAssistantWorkspaceMemory
+} from "../assistant/workspace.js";
 import { generateDailyAssistantReply } from "../assistant/daily-reply.js";
 import { writeHeartbeat } from "../heartbeat/heartbeat-service.js";
-import { assertWithinRoot, pathExists, toErrorMessage } from "../core/utils.js";
+import { assertWithinRoot, pathExists, toErrorMessage, truncate } from "../core/utils.js";
 import { TelegramClient, type TelegramMessage, type TelegramUpdate } from "./telegram-client.js";
 
 export interface RunTelegramServiceOptions {
@@ -29,6 +43,9 @@ function formatTelegramHelp(): string {
     "/help",
     "/status",
     "/whoami",
+    "/workspace",
+    "/memory",
+    "/remember <text>",
     "/note <text>",
     "/notes",
     "/todo <text>",
@@ -38,6 +55,12 @@ function formatTelegramHelp(): string {
     "/remind today 18:30 call mom",
     "/remind 2026-03-25 09:00 standup",
     "/reminders",
+    "/schedule every 2h | stretch",
+    "/schedule daily 09:00 | morning plan",
+    "/schedule weekdays 18:00 | review todos",
+    "/schedule weekly mon 10:00 | status update",
+    "/schedules",
+    "/unschedule <id-prefix>",
     "",
     "Every other text message is answered by the assistant."
   ].join("\n");
@@ -70,6 +93,17 @@ function formatReminders(user: AssistantUserState | undefined): string {
     .slice(-10)
     .map((reminder) => `- ${reminder.id.slice(0, 8)} ${formatReminderDate(reminder.dueAt)} ${reminder.text}`)
     .join("\n");
+}
+
+function formatWorkspaceSummary(root: string, config: MicroClawConfig, chatId: string): string {
+  const paths = getAssistantWorkspacePaths(root, config, chatId);
+  return [
+    `Workspace: ${paths.relativeDir}`,
+    `Memory File: ${paths.relativeDir}/CLAUDE.md`,
+    `Notes File: ${paths.relativeDir}/notes.md`,
+    `Todos File: ${paths.relativeDir}/todos.md`,
+    `Reminders File: ${paths.relativeDir}/reminders.md`
+  ].join("\n");
 }
 
 function parseCommand(text: string): { command: string; args: string } | undefined {
@@ -145,6 +179,7 @@ function formatStatusMarkdown(result: TelegramServiceResult): string {
     `Checked At: ${result.checkedAt}`,
     `Processed Updates: ${result.processedUpdates}`,
     `Delivered Reminders: ${result.deliveredReminders}`,
+    `Delivered Scheduled Tasks: ${result.deliveredScheduledTasks}`,
     `Last Update Id: ${result.lastUpdateId ?? "none"}`,
     `Heartbeat: ${result.heartbeatStatus ?? "unknown"}`,
     `Assistant State: ${result.stateFile}`,
@@ -212,12 +247,33 @@ async function handleTelegramCommand(options: {
     case "whoami":
       reply = `Chat ID: ${chatId}\nDisplay Name: ${formatDisplayName(options.message)}\nUsername: ${options.message.from?.username ?? "unknown"}`;
       break;
-    case "status":
+    case "status": {
+      const schedules = await listAssistantScheduledTasks(options.root, options.config, chatId);
       reply = [
         `Notes: ${options.user?.notes.length ?? 0}`,
         `Open todos: ${options.user?.todos.filter((todo) => !todo.completedAt).length ?? 0}`,
-        `Pending reminders: ${options.user?.reminders.filter((reminder) => !reminder.deliveredAt).length ?? 0}`
+        `Pending reminders: ${options.user?.reminders.filter((reminder) => !reminder.deliveredAt).length ?? 0}`,
+        `Scheduled tasks: ${schedules.length}`
       ].join("\n");
+      break;
+    }
+    case "workspace":
+      reply = formatWorkspaceSummary(options.root, options.config, chatId);
+      break;
+    case "memory":
+      reply = truncate(await readAssistantWorkspaceMemory(options.root, options.config, chatId), 3_500);
+      break;
+    case "remember":
+      if (!parsed.args) {
+        reply = "Usage: /remember <text>";
+        break;
+      }
+      if (!options.user) {
+        reply = "Chat workspace is not ready yet.";
+        break;
+      }
+      await appendAssistantWorkspaceMemory(options.root, options.config, options.user, parsed.args);
+      reply = "Saved to chat memory.";
       break;
     case "note":
       if (!parsed.args) {
@@ -266,6 +322,40 @@ async function handleTelegramCommand(options: {
     case "reminders":
       reply = formatReminders(await getAssistantUserState(options.root, options.config, chatId));
       break;
+    case "schedule":
+      if (!parsed.args) {
+        reply = "Usage: /schedule every 2h | stretch";
+        break;
+      }
+      try {
+        const scheduled = parseAssistantScheduleRequest(parsed.args);
+        const task = await addAssistantScheduledTask(options.root, options.config, chatId, scheduled);
+        reply = [
+          `Scheduled task ${task.id.slice(0, 8)}.`,
+          `Pattern: ${formatAssistantSchedule(task.schedule)}`,
+          `Next run: ${formatReminderDate(task.nextRunAt)}`
+        ].join("\n");
+      } catch (error) {
+        reply = toErrorMessage(error);
+      }
+      break;
+    case "schedules":
+      reply = formatAssistantScheduledTaskList(
+        await listAssistantScheduledTasks(options.root, options.config, chatId)
+      );
+      break;
+    case "unschedule":
+      if (!parsed.args) {
+        reply = "Usage: /unschedule <id-prefix>";
+        break;
+      }
+      try {
+        const removed = await removeAssistantScheduledTask(options.root, options.config, chatId, parsed.args);
+        reply = removed ? `Removed schedule ${removed.id.slice(0, 8)}.` : "No matching schedule found.";
+      } catch (error) {
+        reply = toErrorMessage(error);
+      }
+      break;
     default:
       return false;
   }
@@ -300,6 +390,64 @@ async function deliverDueReminders(options: {
       createdAt: new Date().toISOString()
     });
     delivered += 1;
+  }
+
+  return delivered;
+}
+
+async function deliverDueScheduledTasks(options: {
+  root: string;
+  config: MicroClawConfig;
+  client: TelegramClient;
+  env?: NodeJS.ProcessEnv;
+}): Promise<number> {
+  let delivered = 0;
+  const dueTasks = await listDueAssistantScheduledTasks(options.root, options.config);
+
+  for (const task of dueTasks) {
+    const scheduleLabel = formatAssistantSchedule(task.schedule);
+    const user = await getAssistantUserState(options.root, options.config, task.chatId);
+    const lastRunAt = new Date().toISOString();
+
+    try {
+      const reply = await generateDailyAssistantReply({
+        root: options.root,
+        config: options.config,
+        chatId: task.chatId,
+        user,
+        userInput: task.prompt,
+        source: "scheduled",
+        sourceLabel: scheduleLabel,
+        env: options.env
+      });
+      const message = `Scheduled task ${task.id.slice(0, 8)} (${scheduleLabel})\n${reply}`;
+
+      await options.client.sendMessage(task.chatId, message);
+      await appendAssistantConversation(options.root, options.config, task.chatId, {
+        role: "assistant",
+        content: message,
+        createdAt: lastRunAt
+      });
+      await markAssistantScheduledTaskRun(options.root, options.config, task.id, {
+        lastRunAt,
+        lastResultSummary: reply
+      });
+      delivered += 1;
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      const nextRunAt = computeNextAssistantScheduleRun(task, new Date(lastRunAt));
+
+      await markAssistantScheduledTaskRun(options.root, options.config, task.id, {
+        lastRunAt,
+        lastError: errorMessage
+      });
+
+      await options.client.sendMessage(
+        task.chatId,
+        `Scheduled task ${task.id.slice(0, 8)} (${scheduleLabel}) failed.\n${errorMessage}\nNext run: ${formatReminderDate(nextRunAt)}`
+      );
+      delivered += 1;
+    }
   }
 
   return delivered;
@@ -348,6 +496,7 @@ async function processTelegramUpdate(options: {
   const reply = await generateDailyAssistantReply({
     root: options.root,
     config: options.config,
+    chatId,
     user,
     userInput: message.text,
     env: options.env
@@ -409,6 +558,12 @@ export async function runTelegramService(options: RunTelegramServiceOptions): Pr
         config: options.config,
         client
       });
+      const deliveredScheduledTasks = await deliverDueScheduledTasks({
+        root: options.root,
+        config: options.config,
+        client,
+        env: options.env
+      });
       const updates = await client.getUpdates(
         telegramState.lastUpdateId,
         options.once ? 0 : options.config.telegram.longPollSeconds
@@ -439,6 +594,7 @@ export async function runTelegramService(options: RunTelegramServiceOptions): Pr
         root: options.root,
         processedUpdates,
         deliveredReminders,
+        deliveredScheduledTasks,
         lastUpdateId: telegramState.lastUpdateId,
         heartbeatStatus: heartbeat.status,
         stateFile: assistantFiles.stateFile,
@@ -446,13 +602,13 @@ export async function runTelegramService(options: RunTelegramServiceOptions): Pr
         statusFile: assertWithinRoot(options.root, options.config.assistant.statusFile),
         statusJsonFile: assertWithinRoot(options.root, options.config.assistant.statusJsonFile),
         note:
-          processedUpdates > 0 || deliveredReminders > 0
+          processedUpdates > 0 || deliveredReminders > 0 || deliveredScheduledTasks > 0
             ? "Telegram assistant processed activity successfully."
             : "Telegram assistant is idle and waiting for the next message."
       });
 
       options.output?.write(
-        `telegram> processed=${processedUpdates} reminders=${deliveredReminders} last_update=${lastResult.lastUpdateId ?? "none"}\n`
+        `telegram> processed=${processedUpdates} reminders=${deliveredReminders} scheduled=${deliveredScheduledTasks} last_update=${lastResult.lastUpdateId ?? "none"}\n`
       );
 
       if (options.once) {

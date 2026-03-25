@@ -24,6 +24,8 @@ The repo now includes a runnable TypeScript starter that covers the early archit
 - Secretgate boundary detection and enforcement,
 - disk-backed session artifacts under `.micro-claw/sessions/`,
 - a readable always-on agent workspace under `.micro-claw/agent/`,
+- chat-isolated Telegram workspaces under `.micro-claw/assistant/chats/<chat-id>/`,
+- recurring Telegram scheduled tasks under `.micro-claw/assistant/schedules.json`,
 - shell, file, search, patch, and git tool execution,
 - first-class skill scaffolding under `skills/<name>/SKILL.md`,
 - verification of discovered build or test commands,
@@ -71,6 +73,8 @@ pnpm build
 ./scripts/micro-claw-safe.sh scan --json
 ./scripts/micro-claw-safe.sh run "inspect this repo and propose the next coding step"
 ```
+
+On Windows, the matching wrapper is `.\scripts\micro-claw-safe.cmd`.
 
 If you want to invoke it directly, the supported pattern is:
 
@@ -143,10 +147,18 @@ The quickest launcher for the Telegram assistant is now:
 pnpm one-click
 ```
 
-You can also call the script directly:
+`pnpm one-click` now uses a Node-based cross-platform launcher, so the same command works on macOS, Linux, and Windows.
+
+You can also call the launcher directly:
 
 ```bash
 ./scripts/micro-claw-one-click.sh
+```
+
+On Windows, use:
+
+```powershell
+.\scripts\micro-claw-one-click.cmd
 ```
 
 The launcher installs dependencies when needed, builds the repo, bootstraps config if missing, and starts the Telegram service through Secretgate when it is available.
@@ -219,12 +231,31 @@ If no profile exists yet and you start it from a real terminal, it will ask for 
 ## Telegram Assistant
 
 Micro Claw can now run as a small Telegram-based daily assistant with persistent notes, todos, reminders, and normal chat replies.
+Each chat now also gets its own small workspace, inspired by NanoClaw group folders:
+
+```text
+.micro-claw/assistant/chats/<chat-id>/CLAUDE.md
+.micro-claw/assistant/chats/<chat-id>/README.md
+.micro-claw/assistant/chats/<chat-id>/notes.md
+.micro-claw/assistant/chats/<chat-id>/todos.md
+.micro-claw/assistant/chats/<chat-id>/reminders.md
+```
+
+That gives each Telegram chat an isolated memory file and a readable folder-level snapshot instead of only a shared JSON blob.
 
 Start the service:
 
 ```bash
 micro-claw telegram-start
 ```
+
+If you want a scannable QR code that opens the bot chat directly in Telegram:
+
+```bash
+micro-claw telegram-qr
+```
+
+`telegram-start` now also prints that QR code automatically before entering the service loop when you run it in normal terminal mode.
 
 Run a single sync cycle:
 
@@ -238,6 +269,9 @@ The Telegram service writes:
 - `.micro-claw/assistant/state.md`
 - `.micro-claw/assistant/status.json`
 - `.micro-claw/assistant/status.md`
+- `.micro-claw/assistant/schedules.json`
+- `.micro-claw/assistant/schedules.md`
+- `.micro-claw/assistant/chats/<chat-id>/CLAUDE.md`
 - `.micro-claw/telegram/state.json`
 
 Supported Telegram commands:
@@ -245,6 +279,9 @@ Supported Telegram commands:
 - `/help`
 - `/status`
 - `/whoami`
+- `/workspace`
+- `/memory`
+- `/remember <text>`
 - `/note <text>`
 - `/notes`
 - `/todo <text>`
@@ -254,8 +291,49 @@ Supported Telegram commands:
 - `/remind today 18:30 call mom`
 - `/remind 2026-03-25 09:00 standup`
 - `/reminders`
+- `/schedule every 2h | stretch`
+- `/schedule daily 09:00 | morning plan`
+- `/schedule weekdays 18:00 | review todos`
+- `/schedule weekly mon 10:00 | status update`
+- `/schedules`
+- `/unschedule <id-prefix>`
 
 Every other text message is answered through the configured model path, while repo- and execution-focused requests can still flow into the existing Micro Claw repo assistant behavior.
+Scheduled tasks run through that same assistant path and can message the originating chat back on the next Telegram service cycle.
+
+## Assistant TUI
+
+You can also run the same daily assistant locally in the terminal without Telegram:
+
+```bash
+micro-claw assistant-tui
+```
+
+That uses a persistent local chat id, `local-tui`, and reuses the same assistant storage:
+
+- `.micro-claw/assistant/chats/local-tui/CLAUDE.md`
+- `.micro-claw/assistant/state.json`
+- `.micro-claw/assistant/schedules.json`
+
+The local assistant supports the same slash commands as the Telegram assistant:
+
+- `/help`
+- `/status`
+- `/workspace`
+- `/memory`
+- `/remember <text>`
+- `/note <text>`
+- `/todo <text>`
+- `/remind ...`
+- `/schedule ...`
+- `/schedules`
+- `/exit`
+
+You can also run a single terminal prompt without entering the interactive loop:
+
+```bash
+micro-claw assistant-tui "what should I remember?"
+```
 
 ## Chat Mode
 

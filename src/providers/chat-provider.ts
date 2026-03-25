@@ -289,7 +289,8 @@ export async function listOllamaModels(config: MicroClawConfig): Promise<OllamaM
 export function resolveOllamaModel(
   availableModels: OllamaModelSummary[],
   desiredModel: string,
-  configuredModel?: string
+  configuredModel?: string,
+  preference: "smallest" | "largest" = "smallest"
 ): string {
   const desired = availableModels.find((model) => model.name === desiredModel)?.name;
   if (desired) {
@@ -303,9 +304,14 @@ export function resolveOllamaModel(
     }
   }
 
-  const smallest = [...availableModels].sort((left, right) => (left.size ?? Number.MAX_SAFE_INTEGER) - (right.size ?? Number.MAX_SAFE_INTEGER))[0];
-  if (smallest?.name) {
-    return smallest.name;
+  const sorted = [...availableModels].sort((left, right) =>
+    preference === "largest"
+      ? (right.size ?? Number.MIN_SAFE_INTEGER) - (left.size ?? Number.MIN_SAFE_INTEGER)
+      : (left.size ?? Number.MAX_SAFE_INTEGER) - (right.size ?? Number.MAX_SAFE_INTEGER)
+  );
+  const fallback = sorted[0];
+  if (fallback?.name) {
+    return fallback.name;
   }
 
   return desiredModel || configuredModel || "";

@@ -69,7 +69,7 @@ export async function runBootstrap(options: RunBootstrapOptions): Promise<Bootst
       createdFiles,
       configPath,
       envFile,
-      note: `Bootstrap completed. Agent profile created for ${profile.name}. Fill in ${envFile} and start ./scripts/micro-claw-one-click.sh.`
+      note: `Bootstrap completed. Agent profile created for ${profile.name}. Fill in ${envFile} and start with pnpm one-click.`
     };
   }
 
@@ -80,7 +80,7 @@ export async function runBootstrap(options: RunBootstrapOptions): Promise<Bootst
     envFile,
     note:
       createdFiles.length > 0
-        ? `Bootstrap completed. Fill in ${envFile} and start ./scripts/micro-claw-one-click.sh.`
+        ? `Bootstrap completed. Fill in ${envFile} and start with pnpm one-click.`
         : "Bootstrap found the expected files already in place."
   };
 }

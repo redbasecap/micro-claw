@@ -11,7 +11,7 @@ export const defaultConfig: MicroClawConfig = {
   },
   provider: {
     kind: "ollama",
-    model: "qwen2.5-coder:14b",
+    model: "qwen3-coder:30b",
     apiKeyEnv: "ANTHROPIC_API_KEY",
     requestTimeoutSeconds: 120,
     maxOutputTokens: 4096,
@@ -58,6 +58,9 @@ export const defaultConfig: MicroClawConfig = {
     summaryFile: ".micro-claw/assistant/state.md",
     statusFile: ".micro-claw/assistant/status.md",
     statusJsonFile: ".micro-claw/assistant/status.json",
+    workspacesDir: ".micro-claw/assistant/chats",
+    schedulesFile: ".micro-claw/assistant/schedules.json",
+    schedulesSummaryFile: ".micro-claw/assistant/schedules.md",
     recentConversationMessages: 8,
     maxNotesPerUser: 50,
     maxTodosPerUser: 50,

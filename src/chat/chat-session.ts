@@ -2,7 +2,7 @@ import { Writable } from "node:stream";
 import { createInterface } from "node:readline/promises";
 import process from "node:process";
 import { resolveAgentProfile } from "../agent/agent-profile.js";
-import { createCliUi, writeHero } from "../cli-ui.js";
+import { createCliUi, writeHero, type CliTone } from "../cli-ui.js";
 import type {
   AgentProfile,
   ChatCompletionResult,
@@ -30,6 +30,7 @@ import {
   type CreateSkillScaffoldOptions
 } from "../skills/skill-scaffold.js";
 import { readTextFile, searchText } from "../tools/file-tool.js";
+import { grepText } from "../tools/grep-tool.js";
 import { ToolExecutor } from "../tools/tool-executor.js";
 
 const CHAT_HELP_LINES = [
@@ -40,6 +41,7 @@ const CHAT_HELP_LINES = [
   "/plan <task>         Build a deterministic plan",
   "/run <task>          Run the existing task loop",
   "/search <query>      Search the repo",
+  "/grep <query>        Search the repo with rg/grep",
   "/read <path>         Read a file snippet",
   "/exit                Leave chat"
 ] as const;
@@ -192,11 +194,12 @@ function formatChatHelp(ui?: ReturnType<typeof createCliUi>): string {
 
 function shouldUseAgentTools(userInput: string): boolean {
   const actionVerb =
-    /\b(add|create|make|write|edit|change|update|delete|remove|fix|run|execute|install|test|build|compile|curl|fetch|download|mkdir|program|document|generate|scaffold|summarize)\b/i;
+    /\b(add|create|make|write|edit|change|update|delete|remove|fix|run|execute|install|test|build|compile|curl|fetch|download|mkdir|program|document|generate|scaffold|summarize|search|scan|list|read|find|erstelle|schreibe|ändere|aendere|loesche|lösche|suche|durchsuche|durchsuchen|liste|zeige|lies|finde|fasse|beschreibe|erkläre|erklaere)\b/i;
   const commandLike = /\b(cd|grep|rg|pwd|ls)\b/i;
   const repoArtifact =
-    /\b(readme|reademe|markdown|docs?|documentation|file|files|folder|directory|repo|repository|summary|overview)\b/i;
-  const repoIntent = /\b(add|create|make|write|document|generate|summarize|tell|describe|explain)\b/i;
+    /\b(readme|reademe|markdown|docs?|documentation|dokumentation|file|files|datei|dateien|folder|directory|ordner|verzeichnis|repo|repository|projekt|summary|overview|inhalt|inhalte|alles)\b/i;
+  const repoIntent =
+    /\b(add|create|make|write|document|generate|summarize|tell|describe|explain|search|scan|list|show|find|erstelle|schreibe|suche|durchsuche|durchsuchen|liste|zeige|finde|fasse|beschreibe|erkläre|erklaere)\b/i;
 
   return actionVerb.test(userInput) || commandLike.test(userInput) || (repoArtifact.test(userInput) && repoIntent.test(userInput));
 }
@@ -247,6 +250,7 @@ function buildToolPrompt(
     '{"type":"tool","tool":"list_files","input":{"directory":".","maxResults":50}}',
     '{"type":"tool","tool":"read_file","input":{"path":"src/app.ts"}}',
     '{"type":"tool","tool":"search","input":{"query":"snake","maxResults":20}}',
+    '{"type":"tool","tool":"grep","input":{"query":"TODO","maxResults":50}}',
     '{"type":"tool","tool":"write_file","input":{"path":"TEST/snake.py","content":"print(\\"hi\\")\\n"}}',
     '{"type":"tool","tool":"replace_text","input":{"path":"src/app.ts","search":"old","replace":"new","expectedReplacements":1}}',
     '{"type":"tool","tool":"delete_file","input":{"path":"tmp.txt"}}',
@@ -257,9 +261,14 @@ function buildToolPrompt(
     '{"type":"tool","tool":"git_diff","input":{}}',
     'Final answer schema: {"type":"final","content":"what you did, what changed, and what was verified"}',
     "Rules:",
-    "- Prefer read_file, list_files, and search before writing.",
+    "- Prefer read_file, list_files, search, and grep before writing.",
     "- Prefer write_file for new files and replace_text for focused edits.",
     "- Prefer create_skill when the user asks for a reusable skill, workflow, or tool folder.",
+    "- Use list_files when the user wants to inspect everything or all files.",
+    "- Use grep when the user explicitly asks for grep/rg or wants text matches across many files.",
+    "- Keep using tools until the requested goal exists and the evidence is explicit.",
+    "- For edit tasks, inspect first, then change files, then verify with another tool when possible.",
+    "- Do not stop after a single exploratory tool if the task still requires creation, editing, execution, or repo-wide evidence.",
     "- Use shell for execution, tests, curl, package installation, directory creation, and commands that need `cd`, pipes, `grep`, or `rg`.",
     "- The shell tool can receive `cwd` for folder-specific work, or you can use `cd <dir> && ...` inside the command.",
     "- One tool per reply.",
@@ -324,6 +333,14 @@ function extractJsonObject(text: string): string | undefined {
   return undefined;
 }
 
+function repairJsonObject(source: string): string {
+  return source
+    .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)"\s*:/g, '$1"$2":')
+    .replace(/([{,]\s*)"([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
+    .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
+    .replace(/,\s*([}\]])/g, "$1");
+}
+
 function parseAgentInstruction(content: string): AgentInstruction | undefined {
   const json = extractJsonObject(content);
   if (!json) {
@@ -334,7 +351,11 @@ function parseAgentInstruction(content: string): AgentInstruction | undefined {
   try {
     parsed = JSON.parse(json) as Record<string, unknown>;
   } catch {
-    return undefined;
+    try {
+      parsed = JSON.parse(repairJsonObject(json)) as Record<string, unknown>;
+    } catch {
+      return undefined;
+    }
   }
 
   if (parsed.type === "final" && typeof parsed.content === "string") {
@@ -394,6 +415,7 @@ function summarizeToolInstruction(instruction: ToolInstruction): string {
     case "list_files":
       return `${instruction.tool} ${String(instruction.input.directory ?? ".")}`.trim();
     case "search":
+    case "grep":
       return `${instruction.tool} ${String(instruction.input.query ?? "")}`.trim();
     case "shell":
       return `${instruction.tool}${instruction.input.cwd ? ` [cwd=${String(instruction.input.cwd)}]` : ""} ${String(instruction.input.command ?? "")}`.trim();
@@ -420,12 +442,35 @@ function writeProgress(
   output.write(`${ui.formatProgress(message)}\n`);
 }
 
+async function withProgressHeartbeat<T>(
+  task: () => Promise<T>,
+  notify: () => void,
+  intervalMs = 10_000
+): Promise<T> {
+  const timer = setInterval(() => {
+    notify();
+  }, intervalMs);
+
+  timer.unref?.();
+
+  try {
+    return await task();
+  } finally {
+    clearInterval(timer);
+  }
+}
+
 function buildToolLoopSummary(
+  usedTools: ToolName[],
   touchedFiles: string[],
   executedCommands: string[],
   failures: string[]
 ): string {
   const lines: string[] = [];
+
+  if (usedTools.length > 0) {
+    lines.push(`Tools used: ${unique(usedTools).join(", ")}.`);
+  }
 
   if (touchedFiles.length > 0) {
     lines.push(`Changed files: ${unique(touchedFiles).join(", ")}.`);
@@ -444,6 +489,173 @@ function buildToolLoopSummary(
   }
 
   return lines.join(" ");
+}
+
+function writeAgentNote(
+  output: Writable,
+  enabled: boolean,
+  message: string,
+  ui: ReturnType<typeof createCliUi>,
+  tone: CliTone = "secondary"
+): void {
+  if (!enabled) {
+    return;
+  }
+
+  output.write(`${ui.formatAgent(message, tone)}\n`);
+}
+
+function summarizeToolPreview(result: ToolResult): string[] {
+  if (result.data === undefined) {
+    return [];
+  }
+
+  if (Array.isArray(result.data)) {
+    if (result.data.length === 0) {
+      return ["no rows returned"];
+    }
+
+    const preview = result.data
+      .slice(0, 4)
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+
+        if (
+          typeof item === "object" &&
+          item !== null &&
+          typeof (item as { path?: unknown }).path === "string"
+        ) {
+          const path = String((item as { path: string }).path);
+          const line =
+            typeof (item as { line?: unknown }).line === "number"
+              ? `:${String((item as { line: number }).line)}`
+              : "";
+          const previewText =
+            typeof (item as { preview?: unknown }).preview === "string"
+              ? ` ${(item as { preview: string }).preview}`
+              : "";
+          return `${path}${line}${previewText}`.trim();
+        }
+
+        return truncate(JSON.stringify(item), 120);
+      })
+      .join(" | ");
+
+    return [`preview: ${preview}`];
+  }
+
+  if (
+    typeof result.data === "object" &&
+    result.data !== null &&
+    typeof (result.data as { command?: unknown }).command === "string"
+  ) {
+    const shellResult = result.data as {
+      command: string;
+      exitCode?: number | null;
+      stdout?: string;
+      stderr?: string;
+      cwd?: string;
+    };
+    const outputPreview = [shellResult.stdout, shellResult.stderr]
+      .filter((value): value is string => typeof value === "string" && value.trim().length > 0)
+      .join("\n")
+      .trim();
+
+    return [
+      `cwd: ${shellResult.cwd ?? "."}`,
+      `exit: ${shellResult.exitCode ?? "none"}`,
+      outputPreview ? `output: ${truncate(outputPreview.replace(/\s+/g, " "), 160)}` : "output: none"
+    ];
+  }
+
+  if (typeof result.data === "string") {
+    return [`output: ${truncate(result.data.replace(/\s+/g, " "), 160)}`];
+  }
+
+  return [`data: ${truncate(JSON.stringify(result.data), 160)}`];
+}
+
+function shouldKeepWorking(
+  userInput: string,
+  usedTools: ToolName[],
+  touchedFiles: string[],
+  executedCommands: string[]
+): string | undefined {
+  const uniqueTools = unique(usedTools);
+  const hasInspection = usedTools.some((tool) =>
+    ["list_files", "read_file", "search", "grep", "git_status", "git_diff"].includes(tool)
+  );
+  const hasAction = usedTools.some((tool) =>
+    ["write_file", "replace_text", "delete_file", "patch", "shell", "create_skill"].includes(tool)
+  );
+  const wantsSearch = /\b(search|scan|grep|rg|find|look for|suche|durchsuche|durchsuchen|finde)\b/i.test(userInput);
+  const wantsExplicitGrep = /\b(grep|rg)\b/i.test(userInput);
+  const wantsChange =
+    /\b(add|create|make|write|edit|change|update|delete|remove|fix|document|generate|erstelle|schreibe|ändere|aendere|loesche|lösche)\b/i.test(
+      userInput
+    );
+  const wantsBroadCoverage =
+    /\b(all|everything|entire|whole|repo|repository|project|overview|summary|readme|documentation|alle|alles|dateien|datei|projekt|readme)\b/i.test(
+      userInput
+    );
+
+  if (wantsExplicitGrep && !usedTools.includes("grep") && !executedCommands.some((command) => /\b(grep|rg)\b/.test(command))) {
+    return "The user explicitly asked for grep or rg evidence.";
+  }
+
+  if (wantsSearch && !hasInspection) {
+    return "The task still needs a repo-wide inspection result.";
+  }
+
+  if (wantsChange && !hasAction && touchedFiles.length === 0) {
+    return "The task asks for a change, but no file change or command action happened yet.";
+  }
+
+  if ((wantsChange || wantsBroadCoverage) && uniqueTools.length < 2) {
+    return "Use at least two different tools so the result is backed by inspection plus action or verification.";
+  }
+
+  return undefined;
+}
+
+function sanitizeChatInput(line: string): string {
+  return line.replace(/\u001b\[200~/g, "").replace(/\u001b\[201~/g, "").trim();
+}
+
+function explainShellCommandInChat(line: string): string | undefined {
+  const trimmed = line.trim();
+  if (
+    !/^(?:pnpm|npm|yarn|bun|npx|node|micro-claw|secretgate|\.\.?[\\/]|[A-Za-z]:\\)/i.test(trimmed)
+  ) {
+    return undefined;
+  }
+
+  if (/\bscan\b/i.test(trimmed)) {
+    return "That is a terminal command. Inside this chat, use /scan. If you want the shell command, leave chat first with /exit or Ctrl+C.";
+  }
+
+  if (/\bplan\b/i.test(trimmed)) {
+    return "That is a terminal command. Inside this chat, use /plan <task>. If you want the shell command, leave chat first with /exit or Ctrl+C.";
+  }
+
+  if (/\brun\b/i.test(trimmed)) {
+    return "That is a terminal command. Inside this chat, use /run <task>. If you want the shell command, leave chat first with /exit or Ctrl+C.";
+  }
+
+  if (/\bskill-create\b/i.test(trimmed)) {
+    return "That is a terminal command. Inside this chat, ask for the skill directly, for example: create a skill for curl smoke tests.";
+  }
+
+  if (/\bchat\b/i.test(trimmed)) {
+    const quotedPrompt = trimmed.match(/\bchat\b\s+["']([\s\S]+?)["']\s*$/i)?.[1];
+    return quotedPrompt
+      ? `You are already in chat. Type the request directly instead: ${quotedPrompt}`
+      : "You are already in the Micro Claw chat prompt. Type the request directly here, or leave chat with /exit before running shell commands.";
+  }
+
+  return "That looks like a terminal command, not a chat message. Use a slash command here, or leave chat with /exit before running shell commands.";
 }
 
 function buildSystemPromptInternal(
@@ -560,7 +772,10 @@ function selectRecentMessages(messages: ChatMessage[], keepRecentMessages: numbe
 async function resolveChatModel(
   state: ChatState,
   config: MicroClawConfig,
-  desiredModel: string
+  desiredModel: string,
+  options?: {
+    preference?: "smallest" | "largest";
+  }
 ): Promise<string> {
   if (state.providerKind !== "ollama") {
     return desiredModel;
@@ -570,7 +785,12 @@ async function resolveChatModel(
     state.availableOllamaModels = await listOllamaModels(config);
   }
 
-  return resolveOllamaModel(state.availableOllamaModels, desiredModel, config.provider.model);
+  return resolveOllamaModel(
+    state.availableOllamaModels,
+    desiredModel,
+    config.provider.model,
+    options?.preference ?? "smallest"
+  );
 }
 
 async function executeUserTurn(
@@ -659,7 +879,9 @@ async function executeAgentTurn(
 ): Promise<ChatCompletionResult> {
   const route = routeTask(config, state.repoSummary, userInput);
   const recentMessages = selectRecentMessages(state.messages, config.context.keepRecentMessages);
-  const model = await resolveChatModel(state, config, route.coderModel);
+  const model = await resolveChatModel(state, config, route.fallbackModel || route.coderModel, {
+    preference: "largest"
+  });
   const executor = new ToolExecutor(root, config);
   const groundingContext = await buildGroundingContext(root, config, state.repoSummary, userInput);
   const workMessages: ChatMessage[] = [
@@ -671,31 +893,60 @@ async function executeAgentTurn(
   ];
 
   writeProgress(output, echoResponse, `tool mode enabled for: ${userInput}`, ui);
+  writeAgentNote(output, echoResponse, `goal: ${userInput}`, ui, "accent");
+  writeAgentNote(output, echoResponse, `model: ${model}`, ui, "secondary");
+  writeAgentNote(output, echoResponse, `route: ${route.reason}`, ui, "muted");
   let finalCompletion: ChatCompletionResult | undefined;
+  const usedTools: ToolName[] = [];
   const touchedFiles: string[] = [];
   const executedCommands: string[] = [];
   const failures: string[] = [];
+  let invalidJsonReplies = 0;
+  const maxToolSteps = 12;
 
-  for (let step = 0; step < 8; step += 1) {
-    writeProgress(output, echoResponse, `planning step ${step + 1}`, ui);
-    const completion = await requestChatCompletion({
-      config,
-      providerKind: state.providerKind,
-      model,
-      messages: [
-        {
-          role: "system",
-          content: buildToolPrompt(root, state.repoSummary, route, boundaryMessage, state.agentProfile)
-        },
-        ...workMessages
-      ],
-      stream: false
-    });
+  for (let step = 0; step < maxToolSteps; step += 1) {
+    writeProgress(output, echoResponse, `planning step ${step + 1}/${maxToolSteps}`, ui);
+    let waitSeconds = 0;
+    const completion = await withProgressHeartbeat(
+      () =>
+        requestChatCompletion({
+          config,
+          providerKind: state.providerKind,
+          model,
+          messages: [
+            {
+              role: "system",
+              content: buildToolPrompt(root, state.repoSummary, route, boundaryMessage, state.agentProfile)
+            },
+            ...workMessages
+          ],
+          stream: false
+        }),
+      () => {
+        waitSeconds += 10;
+        writeProgress(output, echoResponse, `waiting for model response (${waitSeconds}s)`, ui);
+      }
+    );
 
     const instruction = parseAgentInstruction(completion.content);
 
     if (!instruction) {
-      writeProgress(output, echoResponse, "model reply was not valid tool JSON; returning raw output", ui);
+      invalidJsonReplies += 1;
+      if (invalidJsonReplies < 3) {
+        writeProgress(output, echoResponse, "model reply was not valid tool JSON; requesting a corrected tool reply", ui);
+        workMessages.push({
+          role: "assistant",
+          content: completion.content
+        });
+        workMessages.push({
+          role: "user",
+          content:
+            "Your last reply was invalid. Reply again with exactly one valid JSON object that matches the tool schema and continue the task."
+        });
+        continue;
+      }
+
+      writeProgress(output, echoResponse, "model reply stayed invalid; returning raw output", ui);
       finalCompletion = {
         ...completion,
         content: `Tool-mode reply was not valid JSON. Raw model output:\n\n${completion.content}`
@@ -704,6 +955,20 @@ async function executeAgentTurn(
     }
 
     if (instruction.type === "final") {
+      const reasonToContinue = shouldKeepWorking(userInput, usedTools, touchedFiles, executedCommands);
+      if (reasonToContinue) {
+        writeProgress(output, echoResponse, `final answer rejected: ${reasonToContinue}`, ui);
+        workMessages.push({
+          role: "assistant",
+          content: completion.content
+        });
+        workMessages.push({
+          role: "user",
+          content: `Do not stop yet. ${reasonToContinue} Use another tool and continue.`
+        });
+        continue;
+      }
+
       writeProgress(output, echoResponse, "tool loop finished", ui);
       finalCompletion = {
         ...completion,
@@ -718,7 +983,13 @@ async function executeAgentTurn(
       input: instruction.input
     };
     const toolResult = await executor.execute(toolCall);
+    usedTools.push(instruction.tool);
+    invalidJsonReplies = 0;
     writeProgress(output, echoResponse, `${instruction.tool} ${toolResult.ok ? "completed" : "failed"}: ${toolResult.summary}`, ui);
+    for (const previewLine of summarizeToolPreview(toolResult)) {
+      writeAgentNote(output, echoResponse, previewLine, ui, toolResult.ok ? "muted" : "warning");
+    }
+    writeAgentNote(output, echoResponse, `tools so far: ${unique(usedTools).join(", ")}`, ui, "muted");
 
     if (!toolResult.ok) {
       failures.push(`${instruction.tool}: ${toolResult.error ?? toolResult.summary}`);
@@ -728,6 +999,13 @@ async function executeAgentTurn(
       const command = String(instruction.input.command ?? "").trim();
       if (command) {
         executedCommands.push(command);
+      }
+    }
+
+    if (instruction.tool === "grep") {
+      const query = String(instruction.input.query ?? "").trim();
+      if (query) {
+        executedCommands.push(`grep ${query}`);
       }
     }
 
@@ -793,11 +1071,15 @@ async function executeAgentTurn(
     ({
       providerKind: state.providerKind,
       model,
-      content: "Stopped after reaching the tool step limit. Summarize the current state and continue with a narrower request."
+      content: "Stopped after reaching the tool step limit. Summarize the current state, the tools used, and the remaining gap."
     } satisfies ChatCompletionResult);
 
-  if (touchedFiles.length > 0 || executedCommands.length > 0 || failures.length > 0) {
-    completion.content = buildToolLoopSummary(touchedFiles, executedCommands, failures);
+  if (usedTools.length > 0 || touchedFiles.length > 0 || executedCommands.length > 0 || failures.length > 0) {
+    const loopSummary = buildToolLoopSummary(usedTools, touchedFiles, executedCommands, failures);
+    completion.content =
+      finalCompletion && finalCompletion.content.trim().length > 0
+        ? `${loopSummary}\n\nFinal result: ${finalCompletion.content}`
+        : loopSummary;
   }
 
   if (echoResponse) {
@@ -944,6 +1226,22 @@ async function executeSlashCommand(
       output.write(`${ui.decorated ? formatSearchResultsRich(results, ui) : formatSearchResults(results)}\n`);
       return "continue";
     }
+    case "grep": {
+      if (!argument) {
+        output.write(`${ui.decorated ? ui.warning("Usage: /grep <query>") : "Usage: /grep <query>"}\n`);
+        return "continue";
+      }
+
+      const results = await grepText({
+        root,
+        query: argument,
+        maxResults: 20,
+        timeoutMs: config.tools.maxCommandSeconds * 1_000,
+        outputLimit: config.tools.captureCommandOutputLimit
+      });
+      output.write(`${ui.decorated ? formatSearchResultsRich(results, ui) : formatSearchResults(results)}\n`);
+      return "continue";
+    }
     case "read": {
       if (!argument) {
         output.write(`${ui.decorated ? ui.warning("Usage: /read <path>") : "Usage: /read <path>"}\n`);
@@ -995,9 +1293,14 @@ export async function runChatSession(options: RunChatSessionOptions): Promise<Ch
   if (providerKind === "ollama") {
     try {
       state.availableOllamaModels = await listOllamaModels(options.config);
-      state.model = resolveOllamaModel(state.availableOllamaModels, routerDecision.coderModel, options.config.provider.model);
+      state.model = resolveOllamaModel(
+        state.availableOllamaModels,
+        routerDecision.fallbackModel || routerDecision.coderModel,
+        options.config.provider.model,
+        "largest"
+      );
     } catch {
-      state.model = options.config.provider.model || routerDecision.coderModel;
+      state.model = options.config.provider.model || routerDecision.fallbackModel || routerDecision.coderModel;
     }
   }
 
@@ -1052,7 +1355,7 @@ export async function runChatSession(options: RunChatSessionOptions): Promise<Ch
   }
 
   const handleLine = async (line: string): Promise<void> => {
-    const trimmed = line.trim();
+    const trimmed = sanitizeChatInput(line);
     if (!trimmed) {
       return;
     }
@@ -1061,6 +1364,38 @@ export async function runChatSession(options: RunChatSessionOptions): Promise<Ch
       const control = await executeSlashCommand(trimmed, state, options.root, options.config, output, boundary.message, ui);
       if (control === "exit") {
         throw new Error("__MICRO_CLAW_EXIT__");
+      }
+      return;
+    }
+
+    const shellCommandHint = explainShellCommandInChat(trimmed);
+    if (shellCommandHint) {
+      state.messages.push({
+        role: "user",
+        content: trimmed
+      });
+      state.messages.push({
+        role: "assistant",
+        content: shellCommandHint
+      });
+      state.turnCount += 1;
+      state.lastAssistantMessage = shellCommandHint;
+      await session.appendEvent({
+        type: "chat_user",
+        createdAt: new Date().toISOString(),
+        content: trimmed
+      });
+      await session.appendEvent({
+        type: "chat_turn",
+        createdAt: new Date().toISOString(),
+        userInput: trimmed,
+        model: state.model,
+        shellHint: true
+      });
+      await persistChatState(state);
+
+      if (!options.jsonMode) {
+        output.write(`${shellCommandHint}\n`);
       }
       return;
     }

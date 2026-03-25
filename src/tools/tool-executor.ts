@@ -10,6 +10,7 @@ import {
   searchText,
   writeTextFile
 } from "./file-tool.js";
+import { grepText } from "./grep-tool.js";
 import { getGitDiff, getGitStatus } from "./git-tool.js";
 import { runShellCommand } from "./shell-tool.js";
 
@@ -76,6 +77,16 @@ export class ToolExecutor {
           String(call.input.query ?? ""),
           Number(call.input.maxResults ?? 20)
         );
+      case "grep":
+        return grepText({
+          root: this.root,
+          query: String(call.input.query ?? ""),
+          maxResults: Number(call.input.maxResults ?? 50),
+          timeoutMs: this.config.tools.maxCommandSeconds * 1_000,
+          outputLimit: this.config.tools.captureCommandOutputLimit,
+          caseSensitive: call.input.caseSensitive === true,
+          fixedString: call.input.fixedString === false ? false : true
+        });
       case "write_file":
         return writeTextFile(
           this.root,
@@ -164,8 +175,8 @@ function summarizeToolSuccess(tool: ToolCall["tool"], data: unknown): string {
       : `${tool} exited with code ${result.exitCode}.`;
   }
 
-  if (tool === "search") {
-    return `search returned ${(data as unknown[]).length} matches.`;
+  if (tool === "search" || tool === "grep") {
+    return `${tool} returned ${(data as unknown[]).length} matches.`;
   }
 
   if (tool === "list_files") {

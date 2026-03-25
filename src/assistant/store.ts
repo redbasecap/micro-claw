@@ -10,6 +10,7 @@ import type {
   MicroClawConfig
 } from "../core/types.js";
 import { assertWithinRoot, pathExists, timestampId } from "../core/utils.js";
+import { getAssistantWorkspacePaths, syncAssistantWorkspace } from "./workspace.js";
 
 function getAssistantPaths(root: string, config: MicroClawConfig): {
   stateFile: string;
@@ -54,7 +55,7 @@ function formatReminder(reminder: AssistantReminder): string {
   return `${reminder.id.slice(0, 8)} [${reminder.deliveredAt ? "sent" : "pending"}] ${reminder.dueAt} ${reminder.text}`;
 }
 
-function formatSummary(state: AssistantState): string {
+function formatSummary(root: string, config: MicroClawConfig, state: AssistantState): string {
   const users = Object.values(state.users).sort((left, right) => left.chatId.localeCompare(right.chatId));
 
   return [
@@ -66,6 +67,7 @@ function formatSummary(state: AssistantState): string {
     ...users.flatMap((user) => [
       `## Chat ${user.chatId}`,
       "",
+      `Workspace: ${getAssistantWorkspacePaths(root, config, user.chatId).relativeDir}`,
       `Display Name: ${user.displayName ?? "unknown"}`,
       `Username: ${user.username ?? "unknown"}`,
       `Last Seen: ${user.lastSeenAt}`,
@@ -90,7 +92,7 @@ async function saveAssistantState(root: string, config: MicroClawConfig, state: 
   await mkdir(path.dirname(paths.stateFile), { recursive: true });
   await mkdir(path.dirname(paths.summaryFile), { recursive: true });
   await writeFile(paths.stateFile, `${JSON.stringify(state, null, 2)}\n`, "utf8");
-  await writeFile(paths.summaryFile, formatSummary(state), "utf8");
+  await writeFile(paths.summaryFile, formatSummary(root, config, state), "utf8");
   return state;
 }
 
@@ -143,6 +145,7 @@ export async function touchAssistantUser(
     };
   });
 
+  await syncAssistantWorkspace(root, config, state.users[chatId]);
   return state.users[chatId];
 }
 
@@ -163,6 +166,7 @@ export async function appendAssistantConversation(
     };
   });
 
+  await syncAssistantWorkspace(root, config, state.users[chatId]);
   return state.users[chatId];
 }
 
@@ -188,6 +192,7 @@ export async function addAssistantNote(
     };
   });
 
+  await syncAssistantWorkspace(root, config, state.users[chatId]);
   return state.users[chatId].notes[state.users[chatId].notes.length - 1];
 }
 
@@ -213,6 +218,7 @@ export async function addAssistantTodo(
     };
   });
 
+  await syncAssistantWorkspace(root, config, state.users[chatId]);
   return state.users[chatId].todos[state.users[chatId].todos.length - 1];
 }
 
@@ -251,6 +257,13 @@ export async function completeAssistantTodo(
     };
   });
 
+  if (completed) {
+    const user = await getAssistantUserState(root, config, chatId);
+    if (user) {
+      await syncAssistantWorkspace(root, config, user);
+    }
+  }
+
   return completed;
 }
 
@@ -281,6 +294,7 @@ export async function addAssistantReminder(
     };
   });
 
+  await syncAssistantWorkspace(root, config, state.users[chatId]);
   return state.users[chatId].reminders.find((entry) => entry.id === reminder.id) ?? reminder;
 }
 
@@ -318,6 +332,13 @@ export async function markAssistantReminderDelivered(
     };
   });
 
+  if (delivered) {
+    const user = await getAssistantUserState(root, config, chatId);
+    if (user) {
+      await syncAssistantWorkspace(root, config, user);
+    }
+  }
+
   return delivered;
 }
 
@@ -327,12 +348,13 @@ export async function listDueAssistantReminders(
   now = new Date()
 ): Promise<Array<{ chatId: string; reminder: AssistantReminder }>> {
   const state = await loadAssistantState(root, config);
-  const dueAt = now.toISOString();
   const due: Array<{ chatId: string; reminder: AssistantReminder }> = [];
+  const nowMs = now.getTime();
 
   for (const [chatId, user] of Object.entries(state.users)) {
     for (const reminder of user.reminders) {
-      if (!reminder.deliveredAt && reminder.dueAt <= dueAt) {
+      const dueAt = new Date(reminder.dueAt);
+      if (!reminder.deliveredAt && !Number.isNaN(dueAt.getTime()) && dueAt.getTime() <= nowMs) {
         due.push({ chatId, reminder });
       }
     }

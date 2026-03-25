@@ -1,0 +1,10 @@
+provider:
+  kind: ollama
+  model: micro-claw-coder
+security:
+  require_secretgate: false
+telegram:
+  enabled: true
+  allowed_chat_ids: []
+assistant:
+  enabled: true

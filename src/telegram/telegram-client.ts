@@ -77,6 +77,14 @@ export class TelegramClient {
     }
   }
 
+  async getMe(): Promise<TelegramUser> {
+    try {
+      return await this.request<TelegramUser>("getMe", {});
+    } catch (error) {
+      throw new Error(`Telegram getMe failed: ${toErrorMessage(error)}`);
+    }
+  }
+
   async sendMessage(chatId: string, text: string): Promise<void> {
     try {
       await this.request("sendMessage", {

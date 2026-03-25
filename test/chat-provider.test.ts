@@ -20,6 +20,20 @@ describe("resolveOllamaModel", () => {
 
     expect(model).toBe("small-model");
   });
+
+  test("can prefer the largest installed model when requested", () => {
+    const model = resolveOllamaModel(
+      [
+        { name: "large-model", size: 100 },
+        { name: "small-model", size: 10 }
+      ],
+      "missing-model",
+      "also-missing",
+      "largest"
+    );
+
+    expect(model).toBe("large-model");
+  });
 });
 
 describe("requestChatCompletion", () => {

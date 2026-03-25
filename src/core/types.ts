@@ -8,6 +8,7 @@ export type ToolName =
   | "read_file"
   | "list_files"
   | "search"
+  | "grep"
   | "patch"
   | "write_file"
   | "replace_text"
@@ -76,6 +77,9 @@ export interface MicroClawConfig {
     summaryFile: string;
     statusFile: string;
     statusJsonFile: string;
+    workspacesDir: string;
+    schedulesFile: string;
+    schedulesSummaryFile: string;
     recentConversationMessages: number;
     maxNotesPerUser: number;
     maxTodosPerUser: number;
@@ -341,6 +345,50 @@ export interface AssistantState {
   users: Record<string, AssistantUserState>;
 }
 
+export type AssistantSchedulePattern =
+  | {
+      kind: "interval";
+      every: number;
+      unit: "minutes" | "hours" | "days";
+    }
+  | {
+      kind: "daily";
+      hour: number;
+      minute: number;
+      weekdaysOnly: boolean;
+    }
+  | {
+      kind: "weekly";
+      weekday: number;
+      hour: number;
+      minute: number;
+    };
+
+export interface AssistantScheduledTask {
+  id: string;
+  chatId: string;
+  prompt: string;
+  createdAt: string;
+  updatedAt: string;
+  nextRunAt: string;
+  lastRunAt?: string;
+  lastResultSummary?: string;
+  lastError?: string;
+  schedule: AssistantSchedulePattern;
+}
+
+export interface AssistantScheduleState {
+  version: number;
+  updatedAt: string;
+  tasks: AssistantScheduledTask[];
+}
+
+export interface AssistantScheduleParseResult {
+  prompt: string;
+  nextRunAt: string;
+  schedule: AssistantSchedulePattern;
+}
+
 export interface TelegramRuntimeState {
   lastUpdateId?: number;
   updatedAt: string;
@@ -426,6 +474,7 @@ export interface TelegramServiceResult {
   root: string;
   processedUpdates: number;
   deliveredReminders: number;
+  deliveredScheduledTasks: number;
   lastUpdateId?: number;
   heartbeatStatus?: HeartbeatHealth;
   stateFile: string;
@@ -433,6 +482,17 @@ export interface TelegramServiceResult {
   statusFile: string;
   statusJsonFile: string;
   note: string;
+}
+
+export interface AssistantTuiResult {
+  sessionId: string;
+  sessionDir: string;
+  chatId: string;
+  workspaceDir: string;
+  deliveredReminders: number;
+  deliveredScheduledTasks: number;
+  turnCount: number;
+  lastAssistantMessage?: string;
 }
 
 export interface AgentRunResult {

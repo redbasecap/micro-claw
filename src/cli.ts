@@ -4,6 +4,7 @@ import path from "node:path";
 import process from "node:process";
 import { formatAgentProfile, loadAgentProfile, resolveAgentProfile, saveAgentProfile } from "./agent/agent-profile.js";
 import { queueAgentTask, refreshAgentStatus, runResidentAgent } from "./agent/resident-agent.js";
+import { runAssistantTui } from "./assistant/assistant-tui.js";
 import { runChatSession } from "./chat/chat-session.js";
 import { createCliUi, runWithSpinner, writeHero, type CliRow, type CliTone } from "./cli-ui.js";
 import { loadConfig } from "./config/load-config.js";
@@ -18,9 +19,12 @@ import { enforceSecretgateBoundary, inspectSecretgateBoundary } from "./security
 import { runBootstrap } from "./setup/bootstrap.js";
 import { runOllamaSetup } from "./setup/ollama-setup.js";
 import { createShellHelperAssets, createSkillScaffold } from "./skills/skill-scaffold.js";
+import { createTelegramConnectInfo, formatTelegramConnectInfo, type TelegramConnectInfo } from "./telegram/telegram-connect.js";
+import { TelegramClient } from "./telegram/telegram-client.js";
 import { runTelegramService } from "./telegram/telegram-service.js";
 import type {
   AgentRunResult,
+  AssistantTuiResult,
   BootstrapResult,
   ChatSessionResult,
   HeartbeatRecord,
@@ -241,6 +245,25 @@ function renderChatResultRich(ui: ReturnType<typeof createCliUi>, result: ChatSe
   );
 }
 
+function renderAssistantTuiRich(ui: ReturnType<typeof createCliUi>, result: AssistantTuiResult): string {
+  return renderSection(
+    ui,
+    "Assistant TUI",
+    renderRows(ui, [
+      { label: "Session", value: result.sessionId, tone: "accent" },
+      { label: "Chat ID", value: result.chatId, tone: "secondary" },
+      { label: "Workspace", value: result.workspaceDir },
+      { label: "Turns", value: String(result.turnCount), tone: "accent" },
+      { label: "Delivered Reminders", value: String(result.deliveredReminders), tone: result.deliveredReminders > 0 ? "success" : "muted" },
+      {
+        label: "Delivered Scheduled Tasks",
+        value: String(result.deliveredScheduledTasks),
+        tone: result.deliveredScheduledTasks > 0 ? "success" : "muted"
+      }
+    ])
+  );
+}
+
 function renderOllamaSetupRich(ui: ReturnType<typeof createCliUi>, result: OllamaSetupResult): string {
   return renderSection(
     ui,
@@ -295,6 +318,11 @@ function renderTelegramServiceRich(ui: ReturnType<typeof createCliUi>, result: T
         { label: "Checked At", value: result.checkedAt },
         { label: "Processed Updates", value: String(result.processedUpdates), tone: result.processedUpdates > 0 ? "accent" : "muted" },
         { label: "Delivered Reminders", value: String(result.deliveredReminders), tone: result.deliveredReminders > 0 ? "success" : "muted" },
+        {
+          label: "Delivered Scheduled Tasks",
+          value: String(result.deliveredScheduledTasks),
+          tone: result.deliveredScheduledTasks > 0 ? "success" : "muted"
+        },
         { label: "Last Update Id", value: String(result.lastUpdateId ?? "none"), tone: "secondary" },
         { label: "Heartbeat", value: result.heartbeatStatus ?? "unknown", tone: toneFromStatus(result.heartbeatStatus ?? "blocked") },
         { label: "Note", value: result.note, tone: "secondary" }
@@ -506,6 +534,7 @@ function formatTelegramServiceResult(result: TelegramServiceResult): string {
     `Checked At: ${result.checkedAt}`,
     `Processed Updates: ${result.processedUpdates}`,
     `Delivered Reminders: ${result.deliveredReminders}`,
+    `Delivered Scheduled Tasks: ${result.deliveredScheduledTasks}`,
     `Last Update Id: ${result.lastUpdateId ?? "none"}`,
     `Heartbeat: ${result.heartbeatStatus ?? "unknown"}`,
     `Assistant State: ${result.stateFile}`,
@@ -514,6 +543,22 @@ function formatTelegramServiceResult(result: TelegramServiceResult): string {
     `Status JSON: ${result.statusJsonFile}`,
     `Note: ${result.note}`
   ].join("\n");
+}
+
+function formatAssistantTuiResult(result: AssistantTuiResult): string {
+  return [
+    `Session: ${result.sessionId}`,
+    `Chat ID: ${result.chatId}`,
+    `Workspace: ${result.workspaceDir}`,
+    `Turns: ${result.turnCount}`,
+    `Delivered Reminders: ${result.deliveredReminders}`,
+    `Delivered Scheduled Tasks: ${result.deliveredScheduledTasks}`,
+    `Last Assistant Message: ${result.lastAssistantMessage ?? "none"}`
+  ].join("\n");
+}
+
+function formatTelegramQrResult(info: TelegramConnectInfo): string {
+  return formatTelegramConnectInfo(info);
 }
 
 function formatAgentTaskResult(task: import("./core/types.js").AgentTaskRecord): string {
@@ -553,12 +598,14 @@ function helpText(ui?: ReturnType<typeof createCliUi>): string {
     'skill-create "<name>" [--root PATH] [--json] [--description TEXT] [--instructions TEXT] [--shell-helpers]'
   ];
   const chatLines = ['chat ["<prompt>"] [--root PATH] [--config PATH] [--json]'];
+  const assistantLines = ['assistant-tui ["<prompt>"] [--root PATH] [--config PATH] [--json] [--chat-id ID]'];
   const runLines = [
     "scan [--root PATH] [--config PATH] [--json]",
     'plan "<task>" [--root PATH] [--config PATH] [--json]',
     'run "<task>" [--root PATH] [--config PATH] [--json] [--verify]',
     "heartbeat [--root PATH] [--config PATH] [--json] [--once] [--verify] [--interval-seconds N]",
     "doctor [--root PATH] [--config PATH] [--json]",
+    "telegram-qr [--root PATH] [--config PATH] [--json]",
     "telegram-start [--root PATH] [--config PATH] [--json] [--once] [--verify]"
   ];
   const agentLines = [
@@ -574,6 +621,8 @@ function helpText(ui?: ReturnType<typeof createCliUi>): string {
     "micro-claw ollama-setup --include-fallback",
     'micro-claw skill-create "python-game-builder"',
     "micro-claw scan --json",
+    "micro-claw telegram-qr",
+    "micro-claw assistant-tui",
     'micro-claw chat "hello"',
     'micro-claw plan "add a build pipeline"',
     'micro-claw run "inspect this repo and propose the next coding step"',
@@ -593,6 +642,9 @@ function helpText(ui?: ReturnType<typeof createCliUi>): string {
       "Live Chat:",
       ...chatLines.map((line) => `  ${line}`),
       "",
+      "Assistant TUI:",
+      ...assistantLines.map((line) => `  ${line}`),
+      "",
       "Task Runs:",
       ...runLines.map((line) => `  ${line}`),
       "",
@@ -607,10 +659,26 @@ function helpText(ui?: ReturnType<typeof createCliUi>): string {
   return [
     renderSection(ui, "Setup", ui.renderList(setupLines, "strong")),
     renderSection(ui, "Live Chat", ui.renderList(chatLines, "strong")),
+    renderSection(ui, "Assistant TUI", ui.renderList(assistantLines, "strong")),
     renderSection(ui, "Task Runs", ui.renderList(runLines, "strong")),
     renderSection(ui, "Always-On Agent", ui.renderList(agentLines, "strong")),
     renderSection(ui, "Examples", ui.renderList(examples, "secondary"))
   ].join("\n\n");
+}
+
+async function resolveTelegramConnectInfo(config: import("./core/types.js").MicroClawConfig): Promise<TelegramConnectInfo> {
+  const token = process.env[config.telegram.botTokenEnv];
+  if (!token) {
+    throw new Error(`Missing ${config.telegram.botTokenEnv} in the environment.`);
+  }
+
+  const client = new TelegramClient({
+    token,
+    apiBaseUrl: config.telegram.apiBaseUrl,
+    timeoutSeconds: Math.max(config.provider.requestTimeoutSeconds, config.telegram.longPollSeconds + 10)
+  });
+  const bot = await client.getMe();
+  return createTelegramConnectInfo(bot);
 }
 
 async function main(): Promise<void> {
@@ -869,6 +937,34 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (parsed.command === "assistant-tui") {
+    const initialPrompt = parsed.positionals.join(" ").trim();
+    const interactiveAssistant =
+      initialPrompt.length === 0 && !jsonOutput && Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY);
+    if (decorate && !interactiveAssistant) {
+      writeHeader("Assistant TUI", initialPrompt.length > 0 ? "single prompt session" : "local assistant session");
+    }
+    const result = await runAssistantTui({
+      root,
+      config,
+      initialPrompt: initialPrompt || undefined,
+      jsonMode: jsonOutput,
+      interactive: initialPrompt.length === 0 && !jsonOutput ? undefined : false,
+      env: process.env,
+      chatId: getFlag(parsed.flags, "chat-id")
+    });
+
+    if (jsonOutput) {
+      process.stdout.write(`${JSON.stringify(result, null, 2)}\n`);
+      return;
+    }
+
+    if (!process.stdin.isTTY || initialPrompt.length > 0) {
+      process.stdout.write(`${decorate ? renderAssistantTuiRich(ui, result) : formatAssistantTuiResult(result)}\n`);
+    }
+    return;
+  }
+
   if (parsed.command === "plan") {
     writeHeader("Plan", "deterministic execution plan");
     const task = parsed.positionals.join(" ").trim();
@@ -924,6 +1020,12 @@ async function main(): Promise<void> {
       "Telegram",
       parsed.flags.once ? "single telegram sync cycle" : "telegram assistant service"
     );
+
+    if (!jsonOutput) {
+      const connectInfo = await runTask("Resolving Telegram bot QR", () => resolveTelegramConnectInfo(config));
+      process.stdout.write(`${formatTelegramQrResult(connectInfo)}\n\n`);
+    }
+
     const result = await runTelegramService({
       root,
       config,
@@ -937,6 +1039,17 @@ async function main(): Promise<void> {
       jsonOutput
         ? `${JSON.stringify(result, null, 2)}\n`
         : `${decorate ? renderTelegramServiceRich(ui, result) : formatTelegramServiceResult(result)}\n`
+    );
+    return;
+  }
+
+  if (parsed.command === "telegram-qr") {
+    writeHeader("Telegram QR", "scan to open the bot chat");
+    const result = await runTask("Resolving Telegram bot QR", () => resolveTelegramConnectInfo(config));
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : `${formatTelegramQrResult(result)}\n`
     );
     return;
   }

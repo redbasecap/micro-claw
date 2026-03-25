@@ -16,14 +16,16 @@
     "dev": "tsx src/cli.ts",
     "telegram:start": "tsx src/cli.ts telegram-start",
     "ollama:setup": "tsx src/cli.ts ollama-setup",
-    "one-click": "./scripts/micro-claw-one-click.sh",
+    "one-click": "node ./scripts/micro-claw-one-click.mjs",
     "test": "vitest run"
   },
   "dependencies": {
+    "qrcode": "^1.5.4",
     "yaml": "^2.8.1"
   },
   "devDependencies": {
     "@types/node": "^20.17.30",
+    "@types/qrcode": "^1.5.6",
     "tsx": "^4.19.3",
     "typescript": "^5.8.3",
     "vitest": "^2.1.8"

@@ -5,7 +5,9 @@ import { runChatSession } from "../chat/chat-session.js";
 import { requestChatCompletion, listOllamaModels, resolveOllamaModel } from "../providers/chat-provider.js";
 import { routeTask } from "../router/model-router.js";
 import { scanRepository } from "../scanner/repo-scanner.js";
+import { truncate } from "../core/utils.js";
 import { formatAssistantUserContext } from "./store.js";
+import { readAssistantWorkspaceMemory } from "./workspace.js";
 
 function createSilentWritable(): Writable {
   return new Writable({
@@ -30,14 +32,17 @@ async function resolveModel(config: MicroClawConfig, desiredModel: string, provi
   }
 
   const available = await listOllamaModels(config);
-  return resolveOllamaModel(available, desiredModel, config.provider.model);
+  return resolveOllamaModel(available, desiredModel, config.provider.model, "largest");
 }
 
 function buildDailyMessages(
   profile: Awaited<ReturnType<typeof resolveAgentProfile>>,
   user: AssistantUserState | undefined,
+  workspaceMemory: string,
   userInput: string,
-  keepConversationMessages: number
+  keepConversationMessages: number,
+  source: "user" | "scheduled",
+  sourceLabel?: string
 ): ChatMessage[] {
   const recentConversation = [...(user?.conversation.slice(-keepConversationMessages * 2) ?? [])];
   const lastConversationEntry = recentConversation[recentConversation.length - 1];
@@ -56,6 +61,7 @@ function buildDailyMessages(
         `You are ${profile.name}, a concise daily-life assistant reached over Telegram.`,
         `Behavior preference: ${profile.behavior}`,
         "You help with planning, reminders, todos, notes, and practical everyday questions.",
+        "Each Telegram chat has its own isolated workspace memory file. Use it as durable context.",
         "Use the persistent user context when it is relevant, but do not dump it back verbatim.",
         "Be brief, clear, and action-oriented.",
         "If the user asks for repository automation or code execution, keep the answer practical."
@@ -65,6 +71,11 @@ function buildDailyMessages(
     {
       role: "user",
       content: [
+        `Trigger: ${source === "scheduled" ? `scheduled task (${sourceLabel ?? "scheduled"})` : "direct Telegram message"}`,
+        "",
+        "Workspace memory (CLAUDE.md):",
+        truncate(workspaceMemory.trim() || "No workspace memory saved yet.", 4_000),
+        "",
         "Persistent user context:",
         formatAssistantUserContext(user, keepConversationMessages),
         "",
@@ -78,15 +89,23 @@ function buildDailyMessages(
 export async function generateDailyAssistantReply(options: {
   root: string;
   config: MicroClawConfig;
+  chatId: string;
   user?: AssistantUserState;
   userInput: string;
+  source?: "user" | "scheduled";
+  sourceLabel?: string;
   env?: NodeJS.ProcessEnv;
 }): Promise<string> {
+  const source = options.source ?? "user";
+
   if (shouldRouteToRepoAssistant(options.userInput)) {
     const chat = await runChatSession({
       root: options.root,
       config: options.config,
-      initialPrompt: options.userInput,
+      initialPrompt:
+        source === "scheduled"
+          ? `Scheduled task (${options.sourceLabel ?? "scheduled"}): ${options.userInput}`
+          : options.userInput,
       interactive: false,
       jsonMode: true,
       output: createSilentWritable(),
@@ -102,6 +121,7 @@ export async function generateDailyAssistantReply(options: {
     root: options.root,
     promptIfMissing: false
   });
+  const workspaceMemory = await readAssistantWorkspaceMemory(options.root, options.config, options.chatId);
   const model = await resolveModel(options.config, route.coderModel, route.providerKind);
   const completion = await requestChatCompletion({
     config: options.config,
@@ -110,8 +130,11 @@ export async function generateDailyAssistantReply(options: {
     messages: buildDailyMessages(
       profile,
       options.user,
+      workspaceMemory,
       options.userInput,
-      options.config.assistant.recentConversationMessages
+      options.config.assistant.recentConversationMessages,
+      source,
+      options.sourceLabel
     ),
     stream: false
   });

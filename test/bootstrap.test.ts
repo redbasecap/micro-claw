@@ -34,5 +34,6 @@ describe("runBootstrap", () => {
 
     const profileFile = await readFile(path.join(root, ".micro-claw", "agent", "profile.json"), "utf8");
     expect(profileFile).toContain("Micro Claw");
+    expect(result.note).toContain("pnpm one-click");
   });
 });

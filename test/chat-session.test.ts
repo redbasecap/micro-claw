@@ -128,6 +128,75 @@ describe("runChatSession", () => {
     expect(transcript).toContain("hello from micro claw");
   });
 
+  test("explains shell commands pasted into chat instead of sending them to the model", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "micro-claw-chat-shell-hint-"));
+    tempDirs.push(root);
+
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify(
+        {
+          name: "fixture",
+          private: true
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+    await writeFile(path.join(root, "src", "index.ts"), "export const ok = true;\n", "utf8");
+    await saveAgentProfile(root, {
+      name: "Clawy",
+      behavior: "brief and practical"
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | RequestInfo) => {
+        const url = String(input);
+
+        if (url.endsWith("/api/tags")) {
+          return new Response(
+            JSON.stringify({
+              models: [
+                {
+                  name: "llama3.2:latest",
+                  size: 10
+                }
+              ]
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            }
+          );
+        }
+
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      })
+    );
+
+    const capture = createCaptureWritable();
+
+    const result = await runChatSession({
+      root,
+      config: defaultConfig,
+      initialPrompt: '\u001b[200~pnpm dev scan --json\u001b[201~',
+      interactive: false,
+      jsonMode: false,
+      output: capture.sink,
+      env: {
+        https_proxy: "http://127.0.0.1:8083",
+        SSL_CERT_FILE: "/tmp/secretgate-ca.pem"
+      }
+    });
+
+    expect(result.turnCount).toBe(1);
+    expect(result.lastAssistantMessage).toContain("Inside this chat, use /scan.");
+    expect(capture.read()).toContain("That is a terminal command.");
+  });
+
   test("uses tool mode for actionable prompts and creates files", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "micro-claw-chat-tools-"));
     tempDirs.push(root);
@@ -386,6 +455,254 @@ describe("runChatSession", () => {
     const output = capture.read();
     expect(output).toContain("progress> tool mode enabled");
     expect(output).toContain("progress> running write_file README.md");
+  });
+
+  test("uses tool mode for german search requests instead of giving shell advice", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "micro-claw-chat-german-search-"));
+    tempDirs.push(root);
+    await saveAgentProfile(root, {
+      name: "Clawy",
+      behavior: "brief and practical"
+    });
+
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify(
+        {
+          name: "fixture",
+          private: true
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+    await writeFile(path.join(root, "src", "index.ts"), "export const ok = true;\n", "utf8");
+
+    let chatCallCount = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | RequestInfo) => {
+        const url = String(input);
+
+        if (url.endsWith("/api/tags")) {
+          return new Response(
+            JSON.stringify({
+              models: [
+                {
+                  name: "llama3.2:latest",
+                  size: 10
+                }
+              ]
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            }
+          );
+        }
+
+        if (url.endsWith("/api/chat")) {
+          chatCallCount += 1;
+
+          if (chatCallCount === 1) {
+            return new Response(
+              JSON.stringify({
+                message: {
+                  content: JSON.stringify({
+                    type: "tool",
+                    tool: "list_files",
+                    input: {
+                      directory: ".",
+                      maxResults: 50
+                    }
+                  })
+                }
+              }),
+              {
+                status: 200,
+                headers: { "content-type": "application/json" }
+              }
+            );
+          }
+
+          if (chatCallCount === 2) {
+            return new Response(
+              JSON.stringify({
+                message: {
+                  content: JSON.stringify({
+                    type: "tool",
+                    tool: "read_file",
+                    input: {
+                      path: "src/index.ts"
+                    }
+                  })
+                }
+              }),
+              {
+                status: 200,
+                headers: { "content-type": "application/json" }
+              }
+            );
+          }
+
+          return new Response(
+            JSON.stringify({
+              message: {
+                content: JSON.stringify({
+                  type: "final",
+                  content: "Listed the repository files."
+                })
+              }
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            }
+          );
+        }
+
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      })
+    );
+
+    const capture = createCaptureWritable();
+
+    const result = await runChatSession({
+      root,
+      config: defaultConfig,
+      initialPrompt: "durchsuche alle dateien",
+      interactive: false,
+      jsonMode: false,
+      output: capture.sink,
+      env: {
+        https_proxy: "http://127.0.0.1:8083",
+        SSL_CERT_FILE: "/tmp/secretgate-ca.pem"
+      }
+    });
+
+    expect(result.turnCount).toBe(1);
+    expect(result.lastAssistantMessage).toContain("Tools used: list_files, read_file");
+    expect(result.lastAssistantMessage).toContain("Final result: Listed the repository files.");
+
+    const output = capture.read();
+    expect(output).toContain("progress> tool mode enabled");
+    expect(output).toContain("progress> running list_files .");
+    expect(output).toContain("progress> running read_file src/index.ts");
+    expect(output).not.toContain("find . -type f");
+  });
+
+  test("repairs malformed tool json and runs grep successfully", async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), "micro-claw-chat-grep-repair-"));
+    tempDirs.push(root);
+    await saveAgentProfile(root, {
+      name: "Clawy",
+      behavior: "brief and practical"
+    });
+
+    await mkdir(path.join(root, "src"), { recursive: true });
+    await writeFile(
+      path.join(root, "package.json"),
+      JSON.stringify(
+        {
+          name: "fixture",
+          private: true
+        },
+        null,
+        2
+      ),
+      "utf8"
+    );
+    await writeFile(path.join(root, "src", "notes.txt"), "prosa appears here\n", "utf8");
+
+    let chatCallCount = 0;
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: string | URL | RequestInfo) => {
+        const url = String(input);
+
+        if (url.endsWith("/api/tags")) {
+          return new Response(
+            JSON.stringify({
+              models: [
+                {
+                  name: "llama3.2:latest",
+                  size: 10
+                }
+              ]
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            }
+          );
+        }
+
+        if (url.endsWith("/api/chat")) {
+          chatCallCount += 1;
+
+          if (chatCallCount === 1) {
+            return new Response(
+              JSON.stringify({
+                message: {
+                  content: '{"type":"tool","tool":"grep","input":{"query":"prosa",maxResults":50}}'
+                }
+              }),
+              {
+                status: 200,
+                headers: { "content-type": "application/json" }
+              }
+            );
+          }
+
+          return new Response(
+            JSON.stringify({
+              message: {
+                content: JSON.stringify({
+                  type: "final",
+                  content: "Searched the repo with grep."
+                })
+              }
+            }),
+            {
+              status: 200,
+              headers: { "content-type": "application/json" }
+            }
+          );
+        }
+
+        throw new Error(`Unexpected fetch URL: ${url}`);
+      })
+    );
+
+    const capture = createCaptureWritable();
+
+    const result = await runChatSession({
+      root,
+      config: defaultConfig,
+      initialPrompt: "erstelle ein tool um alles zu druchsuchen mit GREP",
+      interactive: false,
+      jsonMode: false,
+      output: capture.sink,
+      env: {
+        https_proxy: "http://127.0.0.1:8083",
+        SSL_CERT_FILE: "/tmp/secretgate-ca.pem"
+      }
+    });
+
+    expect(result.turnCount).toBe(1);
+    expect(result.lastAssistantMessage).toContain("Commands run: grep prosa.");
+    expect(result.lastAssistantMessage).not.toContain("Tool-mode reply was not valid JSON");
+
+    const transcript = await readFile(path.join(result.sessionDir, "chat-transcript.md"), "utf8");
+    expect(transcript).toContain('"tool":"grep"');
+
+    const output = capture.read();
+    expect(output).toContain("progress> running grep prosa");
+    expect(output).toContain("progress> grep completed");
   });
 
   test("creates a simple skill scaffold directly from a chat prompt", async () => {

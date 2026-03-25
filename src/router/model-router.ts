@@ -19,6 +19,22 @@ function scoreComplexity(task: string, repoSummary: RepoSummary): number {
     score += 1;
   }
 
+  if (
+    /\b(repo|repository|all files|every file|readme|documentation|summary|overview|tool|workflow|agent|grep|search|scan|durchsuche|durchsuchen|dateien|dokumentation|zusammenfassung)\b/i.test(
+      task
+    )
+  ) {
+    score += 2;
+  }
+
+  if (
+    /\b(add|create|write|edit|change|update|fix|document|generate|erstelle|schreibe|ändere|aendere|suche|fasse|beschreibe)\b/i.test(
+      task
+    )
+  ) {
+    score += 1;
+  }
+
   return score;
 }
 

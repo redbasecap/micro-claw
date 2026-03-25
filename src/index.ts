@@ -14,6 +14,7 @@ export { runBootstrap } from "./setup/bootstrap.js";
 export { parseBaseModelFromModelfileSource, runOllamaSetup } from "./setup/ollama-setup.js";
 export { createSkillScaffold } from "./skills/skill-scaffold.js";
 export { generateDailyAssistantReply } from "./assistant/daily-reply.js";
+export { runAssistantTui } from "./assistant/assistant-tui.js";
 export { parseReminderRequest } from "./assistant/reminder-parser.js";
 export {
   addAssistantNote,

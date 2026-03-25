@@ -1,0 +1,587 @@
+import { Writable } from "node:stream";
+import { createInterface } from "node:readline/promises";
+import process from "node:process";
+import { resolveAgentProfile } from "../agent/agent-profile.js";
+import { createCliUi, writeHero } from "../cli-ui.js";
+import type {
+  AssistantReminder,
+  AssistantScheduledTask,
+  AssistantTuiResult,
+  AssistantUserState,
+  MicroClawConfig
+} from "../core/types.js";
+import { toErrorMessage, truncate } from "../core/utils.js";
+import { SessionStore } from "../memory/session-store.js";
+import { inspectSecretgateBoundary } from "../security/secretgate-boundary.js";
+import {
+  appendAssistantConversation,
+  addAssistantNote,
+  addAssistantReminder,
+  addAssistantTodo,
+  completeAssistantTodo,
+  getAssistantUserState,
+  listDueAssistantReminders,
+  markAssistantReminderDelivered,
+  touchAssistantUser
+} from "./store.js";
+import {
+  addAssistantScheduledTask,
+  formatAssistantScheduledTaskList,
+  listAssistantScheduledTasks,
+  listDueAssistantScheduledTasks,
+  markAssistantScheduledTaskRun,
+  removeAssistantScheduledTask
+} from "./schedule-store.js";
+import { formatReminderDate, parseReminderRequest } from "./reminder-parser.js";
+import { computeNextAssistantScheduleRun, formatAssistantSchedule, parseAssistantScheduleRequest } from "./schedule-parser.js";
+import { appendAssistantWorkspaceMemory, getAssistantWorkspacePaths, readAssistantWorkspaceMemory } from "./workspace.js";
+import { generateDailyAssistantReply } from "./daily-reply.js";
+
+const DEFAULT_CHAT_ID = "local-tui";
+
+const HELP_LINES = [
+  "/help",
+  "/status",
+  "/whoami",
+  "/workspace",
+  "/memory",
+  "/remember <text>",
+  "/note <text>",
+  "/notes",
+  "/todo <text>",
+  "/todos",
+  "/done <id-prefix>",
+  "/remind in 2h buy milk",
+  "/reminders",
+  "/schedule every 2h | stretch",
+  "/schedules",
+  "/unschedule <id-prefix>",
+  "/exit"
+] as const;
+
+function parseCommand(text: string): { command: string; args: string } | undefined {
+  const trimmed = text.trim();
+  if (!trimmed.startsWith("/")) {
+    return undefined;
+  }
+
+  const firstSpace = trimmed.indexOf(" ");
+  if (firstSpace < 0) {
+    return {
+      command: trimmed.slice(1).toLowerCase(),
+      args: ""
+    };
+  }
+
+  return {
+    command: trimmed.slice(1, firstSpace).toLowerCase(),
+    args: trimmed.slice(firstSpace + 1).trim()
+  };
+}
+
+function formatHelp(): string {
+  return ["Commands:", ...HELP_LINES].join("\n");
+}
+
+function formatNotes(user: AssistantUserState | undefined): string {
+  if (!user || user.notes.length === 0) {
+    return "No notes saved yet.";
+  }
+
+  return user.notes.slice(-10).map((note) => `- ${note.id.slice(0, 8)} ${note.text}`).join("\n");
+}
+
+function formatTodos(user: AssistantUserState | undefined): string {
+  const openTodos = user?.todos.filter((todo) => !todo.completedAt) ?? [];
+  if (openTodos.length === 0) {
+    return "No open todos.";
+  }
+
+  return openTodos.slice(-10).map((todo) => `- ${todo.id.slice(0, 8)} ${todo.text}`).join("\n");
+}
+
+function formatReminders(user: AssistantUserState | undefined): string {
+  const reminders = user?.reminders.filter((reminder) => !reminder.deliveredAt) ?? [];
+  if (reminders.length === 0) {
+    return "No pending reminders.";
+  }
+
+  return reminders
+    .slice(-10)
+    .map((reminder) => `- ${reminder.id.slice(0, 8)} ${formatReminderDate(reminder.dueAt)} ${reminder.text}`)
+    .join("\n");
+}
+
+function formatWorkspaceSummary(root: string, config: MicroClawConfig, chatId: string): string {
+  const paths = getAssistantWorkspacePaths(root, config, chatId);
+  return [
+    `Workspace: ${paths.relativeDir}`,
+    `Memory File: ${paths.relativeDir}/CLAUDE.md`,
+    `Notes File: ${paths.relativeDir}/notes.md`,
+    `Todos File: ${paths.relativeDir}/todos.md`,
+    `Reminders File: ${paths.relativeDir}/reminders.md`
+  ].join("\n");
+}
+
+function formatReminderNotification(reminder: AssistantReminder): string {
+  return `Reminder: ${reminder.text}\nDue: ${formatReminderDate(reminder.dueAt)}`;
+}
+
+interface AssistantTuiState {
+  session: SessionStore;
+  chatId: string;
+  user: AssistantUserState;
+  turnCount: number;
+  deliveredReminders: number;
+  deliveredScheduledTasks: number;
+  lastAssistantMessage?: string;
+}
+
+export interface RunAssistantTuiOptions {
+  root: string;
+  config: MicroClawConfig;
+  initialPrompt?: string;
+  interactive?: boolean;
+  output?: Writable;
+  env?: NodeJS.ProcessEnv;
+  jsonMode?: boolean;
+  chatId?: string;
+}
+
+async function refreshUser(
+  root: string,
+  config: MicroClawConfig,
+  chatId: string
+): Promise<AssistantUserState> {
+  const user = await getAssistantUserState(root, config, chatId);
+  if (!user) {
+    throw new Error(`Assistant user ${chatId} is missing.`);
+  }
+
+  return user;
+}
+
+async function persistState(state: AssistantTuiState): Promise<void> {
+  await state.session.writeJson("assistant-tui-state.json", {
+    chatId: state.chatId,
+    turnCount: state.turnCount,
+    deliveredReminders: state.deliveredReminders,
+    deliveredScheduledTasks: state.deliveredScheduledTasks,
+    lastAssistantMessage: state.lastAssistantMessage
+  });
+}
+
+async function recordAssistantMessage(
+  root: string,
+  config: MicroClawConfig,
+  state: AssistantTuiState,
+  message: string,
+  createdAt = new Date().toISOString()
+): Promise<void> {
+  await appendAssistantConversation(root, config, state.chatId, {
+    role: "assistant",
+    content: message,
+    createdAt
+  });
+  state.user = await refreshUser(root, config, state.chatId);
+  state.lastAssistantMessage = message;
+}
+
+async function drainInbox(options: {
+  root: string;
+  config: MicroClawConfig;
+  state: AssistantTuiState;
+  env?: NodeJS.ProcessEnv;
+}): Promise<string[]> {
+  const messages: string[] = [];
+  const dueReminders = (await listDueAssistantReminders(options.root, options.config)).filter(
+    (entry) => entry.chatId === options.state.chatId
+  );
+
+  for (const due of dueReminders) {
+    const notification = formatReminderNotification(due.reminder);
+    await markAssistantReminderDelivered(options.root, options.config, options.state.chatId, due.reminder.id);
+    await recordAssistantMessage(options.root, options.config, options.state, notification);
+    options.state.deliveredReminders += 1;
+    messages.push(notification);
+  }
+
+  const dueTasks = (await listDueAssistantScheduledTasks(options.root, options.config)).filter(
+    (task) => task.chatId === options.state.chatId
+  );
+
+  for (const task of dueTasks) {
+    const scheduleLabel = formatAssistantSchedule(task.schedule);
+    const lastRunAt = new Date().toISOString();
+
+    try {
+      const reply = await generateDailyAssistantReply({
+        root: options.root,
+        config: options.config,
+        chatId: options.state.chatId,
+        user: options.state.user,
+        userInput: task.prompt,
+        source: "scheduled",
+        sourceLabel: scheduleLabel,
+        env: options.env
+      });
+      const notification = `Scheduled task ${task.id.slice(0, 8)} (${scheduleLabel})\n${reply}`;
+      await markAssistantScheduledTaskRun(options.root, options.config, task.id, {
+        lastRunAt,
+        lastResultSummary: reply
+      });
+      await recordAssistantMessage(options.root, options.config, options.state, notification, lastRunAt);
+      options.state.deliveredScheduledTasks += 1;
+      messages.push(notification);
+    } catch (error) {
+      const errorMessage = toErrorMessage(error);
+      const nextRunAt = computeNextAssistantScheduleRun(task, new Date(lastRunAt));
+      const notification = `Scheduled task ${task.id.slice(0, 8)} (${scheduleLabel}) failed.\n${errorMessage}\nNext run: ${formatReminderDate(nextRunAt)}`;
+      await markAssistantScheduledTaskRun(options.root, options.config, task.id, {
+        lastRunAt,
+        lastError: errorMessage
+      });
+      await recordAssistantMessage(options.root, options.config, options.state, notification, lastRunAt);
+      options.state.deliveredScheduledTasks += 1;
+      messages.push(notification);
+    }
+  }
+
+  await persistState(options.state);
+  return messages;
+}
+
+async function handleCommand(options: {
+  root: string;
+  config: MicroClawConfig;
+  state: AssistantTuiState;
+  line: string;
+}): Promise<string | "exit"> {
+  const parsed = parseCommand(options.line);
+  if (!parsed) {
+    throw new Error("Not a command.");
+  }
+
+  switch (parsed.command) {
+    case "help":
+      return formatHelp();
+    case "whoami":
+      return `Chat ID: ${options.state.chatId}\nDisplay Name: ${options.state.user.displayName ?? "unknown"}\nUsername: ${options.state.user.username ?? "unknown"}`;
+    case "status": {
+      const schedules = await listAssistantScheduledTasks(options.root, options.config, options.state.chatId);
+      return [
+        `Notes: ${options.state.user.notes.length}`,
+        `Open todos: ${options.state.user.todos.filter((todo) => !todo.completedAt).length}`,
+        `Pending reminders: ${options.state.user.reminders.filter((reminder) => !reminder.deliveredAt).length}`,
+        `Scheduled tasks: ${schedules.length}`
+      ].join("\n");
+    }
+    case "workspace":
+      return formatWorkspaceSummary(options.root, options.config, options.state.chatId);
+    case "memory":
+      return truncate(await readAssistantWorkspaceMemory(options.root, options.config, options.state.chatId), 3_500);
+    case "remember":
+      if (!parsed.args) {
+        return "Usage: /remember <text>";
+      }
+      await appendAssistantWorkspaceMemory(options.root, options.config, options.state.user, parsed.args);
+      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
+      return "Saved to chat memory.";
+    case "note":
+      if (!parsed.args) {
+        return "Usage: /note <text>";
+      }
+      await addAssistantNote(options.root, options.config, options.state.chatId, parsed.args);
+      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
+      return "Note saved.";
+    case "notes":
+      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
+      return formatNotes(options.state.user);
+    case "todo":
+      if (!parsed.args) {
+        return "Usage: /todo <text>";
+      }
+      await addAssistantTodo(options.root, options.config, options.state.chatId, parsed.args);
+      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
+      return "Todo added.";
+    case "todos":
+      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
+      return formatTodos(options.state.user);
+    case "done": {
+      if (!parsed.args) {
+        return "Usage: /done <id-prefix>";
+      }
+      const completed = await completeAssistantTodo(
+        options.root,
+        options.config,
+        options.state.chatId,
+        parsed.args
+      );
+      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
+      return completed ? `Completed todo ${completed.id.slice(0, 8)}.` : "No matching open todo found.";
+    }
+    case "remind":
+      if (!parsed.args) {
+        return "Usage: /remind in 2h buy milk";
+      }
+      try {
+        const reminder = parseReminderRequest(parsed.args);
+        await addAssistantReminder(options.root, options.config, options.state.chatId, reminder);
+        options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
+        return `Reminder saved for ${formatReminderDate(reminder.dueAt)}.`;
+      } catch (error) {
+        return toErrorMessage(error);
+      }
+    case "reminders":
+      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
+      return formatReminders(options.state.user);
+    case "schedule":
+      if (!parsed.args) {
+        return "Usage: /schedule every 2h | stretch";
+      }
+      try {
+        const scheduled = parseAssistantScheduleRequest(parsed.args);
+        const task = await addAssistantScheduledTask(
+          options.root,
+          options.config,
+          options.state.chatId,
+          scheduled
+        );
+        return [
+          `Scheduled task ${task.id.slice(0, 8)}.`,
+          `Pattern: ${formatAssistantSchedule(task.schedule)}`,
+          `Next run: ${formatReminderDate(task.nextRunAt)}`
+        ].join("\n");
+      } catch (error) {
+        return toErrorMessage(error);
+      }
+    case "schedules":
+      return formatAssistantScheduledTaskList(
+        await listAssistantScheduledTasks(options.root, options.config, options.state.chatId)
+      );
+    case "unschedule":
+      if (!parsed.args) {
+        return "Usage: /unschedule <id-prefix>";
+      }
+      try {
+        const removed = await removeAssistantScheduledTask(
+          options.root,
+          options.config,
+          options.state.chatId,
+          parsed.args
+        );
+        return removed ? `Removed schedule ${removed.id.slice(0, 8)}.` : "No matching schedule found.";
+      } catch (error) {
+        return toErrorMessage(error);
+      }
+    case "exit":
+      return "exit";
+    default:
+      return "Unknown command. Type /help.";
+  }
+}
+
+export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<AssistantTuiResult> {
+  const output = options.output ?? process.stdout;
+  const ui = createCliUi(output, options.env);
+  const interactive =
+    options.interactive ??
+    (Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY) && !options.jsonMode);
+  const chatId = options.chatId?.trim() || DEFAULT_CHAT_ID;
+  const profile = await resolveAgentProfile({
+    root: options.root,
+    output,
+    promptIfMissing: !options.jsonMode && Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY)
+  });
+  const session = await SessionStore.create(options.root, "assistant-tui");
+  const boundary = inspectSecretgateBoundary(options.config, options.env);
+  const initialUser = await touchAssistantUser(options.root, options.config, chatId, {
+    username: "local-tui",
+    displayName: "Local TUI"
+  });
+  const state: AssistantTuiState = {
+    session,
+    chatId,
+    user: initialUser,
+    turnCount: 0,
+    deliveredReminders: 0,
+    deliveredScheduledTasks: 0
+  };
+
+  await session.writeJson("agent-profile.json", profile);
+  await session.writeJson("assistant-tui-meta.json", {
+    chatId,
+    workspaceDir: getAssistantWorkspacePaths(options.root, options.config, chatId).relativeDir,
+    secretgateBoundary: boundary
+  });
+
+  if (interactive) {
+    if (ui.decorated) {
+      await writeHero(output, {
+        animate: true,
+        env: options.env,
+        subtitle: `${profile.name.toUpperCase()} // local assistant`
+      });
+      output.write(
+        [
+          ui.section("Assistant"),
+          ui.renderRows([
+            { label: "Session", value: session.sessionId, tone: "accent" },
+            { label: "Chat ID", value: chatId, tone: "secondary" },
+            { label: "Workspace", value: getAssistantWorkspacePaths(options.root, options.config, chatId).relativeDir },
+            { label: "Behavior", value: profile.behavior },
+            { label: "Secretgate", value: boundary.message, tone: boundary.ok ? "success" : "warning" }
+          ]),
+          "",
+          ui.muted("Type /help for commands.")
+        ].join("\n") + "\n"
+      );
+    } else {
+      output.write(
+        [
+          `${profile.name} local assistant ${session.sessionId}`,
+          `Chat ID: ${chatId}`,
+          `Workspace: ${getAssistantWorkspacePaths(options.root, options.config, chatId).relativeDir}`,
+          `Behavior: ${profile.behavior}`,
+          `Secretgate: ${boundary.message}`,
+          "Type /help for commands."
+        ].join("\n") + "\n"
+      );
+    }
+  }
+
+  const printInboxMessages = async (): Promise<void> => {
+    const inbox = await drainInbox({
+      root: options.root,
+      config: options.config,
+      state,
+      env: options.env
+    });
+    if (!options.jsonMode) {
+      for (const message of inbox) {
+        output.write(`${message}\n`);
+      }
+    }
+  };
+
+  const handleLine = async (line: string): Promise<void> => {
+    const trimmed = line.trim();
+    if (!trimmed) {
+      return;
+    }
+
+    await printInboxMessages();
+
+    if (trimmed.startsWith("/")) {
+      const result = await handleCommand({
+        root: options.root,
+        config: options.config,
+        state,
+        line: trimmed
+      });
+      if (result === "exit") {
+        throw new Error("__MICRO_CLAW_ASSISTANT_EXIT__");
+      }
+
+      state.turnCount += 1;
+      state.lastAssistantMessage = result;
+      await session.appendEvent({
+        type: "assistant_tui_command",
+        createdAt: new Date().toISOString(),
+        command: trimmed
+      });
+      await recordAssistantMessage(options.root, options.config, state, result);
+      await persistState(state);
+
+      if (!options.jsonMode) {
+        output.write(`${result}\n`);
+      }
+      return;
+    }
+
+    await appendAssistantConversation(options.root, options.config, state.chatId, {
+      role: "user",
+      content: trimmed,
+      createdAt: new Date().toISOString()
+    });
+    state.user = await refreshUser(options.root, options.config, state.chatId);
+
+    const reply = await generateDailyAssistantReply({
+      root: options.root,
+      config: options.config,
+      chatId: state.chatId,
+      user: state.user,
+      userInput: trimmed,
+      source: "user",
+      env: options.env
+    });
+
+    state.turnCount += 1;
+    await recordAssistantMessage(options.root, options.config, state, reply);
+    await session.appendEvent({
+      type: "assistant_tui_turn",
+      createdAt: new Date().toISOString(),
+      userInput: trimmed
+    });
+    await persistState(state);
+
+    if (!options.jsonMode) {
+      output.write(`${reply}\n`);
+    }
+  };
+
+  try {
+    await printInboxMessages();
+
+    if (options.initialPrompt?.trim()) {
+      await handleLine(options.initialPrompt.trim());
+    }
+
+    if (interactive) {
+      const readline = createInterface({
+        input: process.stdin,
+        output,
+        terminal: true
+      });
+
+      try {
+        while (true) {
+          const line = await readline.question(ui.prompt("assistant"));
+          await handleLine(line);
+        }
+      } finally {
+        readline.close();
+      }
+    }
+  } catch (error) {
+    if (!(error instanceof Error) || error.message !== "__MICRO_CLAW_ASSISTANT_EXIT__") {
+      throw error;
+    }
+  }
+
+  const workspace = getAssistantWorkspacePaths(options.root, options.config, chatId);
+  await session.writeText(
+    "summary.md",
+    [
+      `# Assistant TUI ${session.sessionId}`,
+      "",
+      `Chat ID: ${chatId}`,
+      `Workspace: ${workspace.relativeDir}`,
+      `Turns: ${state.turnCount}`,
+      `Delivered Reminders: ${state.deliveredReminders}`,
+      `Delivered Scheduled Tasks: ${state.deliveredScheduledTasks}`,
+      `Last Assistant Message: ${state.lastAssistantMessage ?? "none"}`
+    ].join("\n")
+  );
+
+  return {
+    sessionId: session.sessionId,
+    sessionDir: session.sessionDir,
+    chatId,
+    workspaceDir: workspace.relativeDir,
+    deliveredReminders: state.deliveredReminders,
+    deliveredScheduledTasks: state.deliveredScheduledTasks,
+    turnCount: state.turnCount,
+    lastAssistantMessage: state.lastAssistantMessage
+  };
+}
