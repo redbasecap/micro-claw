@@ -1,0 +1,8 @@
+node_modules
+dist
+.micro-claw
+coverage
+.vitest
+.DS_Store
+heartbeat.md
+.env.micro-claw

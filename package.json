@@ -1,0 +1,31 @@
+{
+  "name": "micro-claw",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "micro-claw": "dist/cli.js"
+  },
+  "engines": {
+    "node": ">=20.10.0"
+  },
+  "scripts": {
+    "build": "node --eval \"require('node:fs').rmSync('dist', { recursive: true, force: true })\" && tsc -p tsconfig.json",
+    "bootstrap": "tsx src/cli.ts bootstrap --allow-direct",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "dev": "tsx src/cli.ts",
+    "telegram:start": "tsx src/cli.ts telegram-start",
+    "ollama:setup": "tsx src/cli.ts ollama-setup",
+    "one-click": "./scripts/micro-claw-one-click.sh",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "yaml": "^2.8.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.30",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.3",
+    "vitest": "^2.1.8"
+  }
+}
