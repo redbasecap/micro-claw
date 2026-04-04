@@ -1074,17 +1074,22 @@ async function executeAgentTurn(
       content: "Stopped after reaching the tool step limit. Summarize the current state, the tools used, and the remaining gap."
     } satisfies ChatCompletionResult);
 
-  if (usedTools.length > 0 || touchedFiles.length > 0 || executedCommands.length > 0 || failures.length > 0) {
-    const loopSummary = buildToolLoopSummary(usedTools, touchedFiles, executedCommands, failures);
-    completion.content =
-      finalCompletion && finalCompletion.content.trim().length > 0
-        ? `${loopSummary}\n\nFinal result: ${finalCompletion.content}`
-        : loopSummary;
-  }
-
   if (echoResponse) {
     writeProgress(output, echoResponse, "sending final answer", ui);
-    output.write(`${completion.content}\n`);
+    
+    if (finalCompletion && finalCompletion.content.trim().length > 0) {
+      output.write(`${finalCompletion.content}\n`);
+      
+      if (usedTools.length > 0) {
+        const loopSummary = buildToolLoopSummary(usedTools, touchedFiles, executedCommands, failures);
+        output.write(`\n${loopSummary}\n`);
+      }
+    } else if (usedTools.length > 0 || touchedFiles.length > 0 || executedCommands.length > 0 || failures.length > 0) {
+      const loopSummary = buildToolLoopSummary(usedTools, touchedFiles, executedCommands, failures);
+      output.write(`${loopSummary}\n`);
+    } else {
+      output.write(`Tool loop completed with no changes.\n`);
+    }
   }
 
   state.messages.push({

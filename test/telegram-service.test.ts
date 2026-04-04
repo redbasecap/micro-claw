@@ -6,6 +6,7 @@ import { parseAssistantScheduleRequest } from "../src/assistant/schedule-parser.
 import { addAssistantScheduledTask } from "../src/assistant/schedule-store.js";
 import { touchAssistantUser } from "../src/assistant/store.js";
 import { defaultConfig } from "../src/config/defaults.js";
+import { _clearOllamaModelCacheForTests } from "../src/providers/chat-provider.js";
 import { runTelegramService } from "../src/telegram/telegram-service.js";
 
 const tempDirs: string[] = [];
@@ -13,6 +14,7 @@ const tempDirs: string[] = [];
 afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  _clearOllamaModelCacheForTests();
   delete process.env.TELEGRAM_BOT_TOKEN;
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });

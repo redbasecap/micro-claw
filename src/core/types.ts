@@ -3,6 +3,17 @@ export type RuntimeMode = "local" | "remote";
 export type ProviderKind = "anthropic" | "ollama" | "openai-compatible" | "none";
 export type ChatRole = "system" | "user" | "assistant";
 
+export type MemoryPressure = "low" | "medium" | "high" | "critical";
+
+export interface SystemMemoryStatus {
+  totalMb: number;
+  freeMb: number;
+  usedMb: number;
+  usedPercent: number;
+  pressure: MemoryPressure;
+  ollamaMemoryMb?: number;
+}
+
 export type ToolName =
   | "shell"
   | "read_file"

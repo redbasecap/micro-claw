@@ -6,12 +6,14 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { saveAgentProfile } from "../src/agent/agent-profile.js";
 import { defaultConfig } from "../src/config/defaults.js";
 import { runAssistantTui } from "../src/assistant/assistant-tui.js";
+import { _clearOllamaModelCacheForTests } from "../src/providers/chat-provider.js";
 
 const tempDirs: string[] = [];
 
 afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  _clearOllamaModelCacheForTests();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 
@@ -55,18 +57,26 @@ describe("runAssistantTui", () => {
       behavior: "brief and practical"
     });
 
+    let tagRequests = 0;
+    const requestedModels: string[] = [];
+
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: string | URL | RequestInfo, init?: RequestInit) => {
         const url = String(input);
 
         if (url.endsWith("/api/tags")) {
+          tagRequests += 1;
           return new Response(
             JSON.stringify({
               models: [
                 {
-                  name: "llama3.2:latest",
+                  name: "micro-claw-planner:latest",
                   size: 10
+                },
+                {
+                  name: "micro-claw-coder:latest",
+                  size: 100
                 }
               ]
             }),
@@ -79,8 +89,10 @@ describe("runAssistantTui", () => {
 
         if (url.endsWith("/api/chat")) {
           const body = JSON.parse(String(init?.body ?? "{}")) as {
+            model?: string;
             messages?: Array<{ role?: string; content?: string }>;
           };
+          requestedModels.push(body.model ?? "");
           const latestUser = body.messages?.findLast((message) => message.role === "user")?.content ?? "";
           expect(latestUser).toContain("Friday gym");
 
@@ -130,6 +142,9 @@ describe("runAssistantTui", () => {
     });
 
     expect(second.lastAssistantMessage).toBe("Remember Friday gym.");
+    expect(secondCapture.read()).toContain("thinking");
+    expect(tagRequests).toBe(3);
+    expect(requestedModels).toEqual(["micro-claw-planner:latest"]);
     expect(
       await readFile(path.join(root, ".micro-claw", "assistant", "chats", "local-tui", "CLAUDE.md"), "utf8")
     ).toContain("Friday gym");

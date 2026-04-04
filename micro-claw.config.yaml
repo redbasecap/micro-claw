@@ -1,6 +1,6 @@
 provider:
   kind: ollama
-  model: micro-claw-coder
+  model: llama3.2:latest
 security:
   require_secretgate: false
 telegram:

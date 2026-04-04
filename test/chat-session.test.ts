@@ -5,6 +5,7 @@ import { Writable } from "node:stream";
 import { afterEach, describe, expect, test, vi } from "vitest";
 import { saveAgentProfile } from "../src/agent/agent-profile.js";
 import { defaultConfig } from "../src/config/defaults.js";
+import { _clearOllamaModelCacheForTests } from "../src/providers/chat-provider.js";
 import { runChatSession } from "../src/chat/chat-session.js";
 
 const tempDirs: string[] = [];
@@ -12,6 +13,7 @@ const tempDirs: string[] = [];
 afterEach(async () => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  _clearOllamaModelCacheForTests();
   await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
 });
 

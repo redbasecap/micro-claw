@@ -20,6 +20,9 @@ interface OllamaModelSummary {
   size?: number;
 }
 
+const OLLAMA_MODEL_CACHE_TTL_MS = 5_000;
+const ollamaModelCache = new Map<string, { expiresAt: number; models: OllamaModelSummary[] }>();
+
 function ensureApiKey(config: MicroClawConfig): string {
   const apiKey = process.env[config.provider.apiKeyEnv];
 
@@ -32,7 +35,8 @@ function ensureApiKey(config: MicroClawConfig): string {
 
 async function parseOllamaStream(
   response: Response,
-  onToken?: (token: string) => void | Promise<void>
+  onToken?: (token: string) => void | Promise<void>,
+  onActivity?: () => void
 ): Promise<{ content: string; finishReason?: string }> {
   if (!response.body) {
     throw new Error("Ollama stream response has no body.");
@@ -46,6 +50,9 @@ async function parseOllamaStream(
 
   while (true) {
     const { done, value } = await reader.read();
+    if (value && value.length > 0) {
+      onActivity?.();
+    }
     buffered += decoder.decode(value, { stream: !done });
 
     let newlineIndex = buffered.indexOf("\n");
@@ -104,44 +111,91 @@ async function parseOllamaStream(
 }
 
 async function requestOllamaChat(request: ProviderChatRequest): Promise<ChatCompletionResult> {
-  const response = await fetch(`${request.config.provider.ollamaHost}/api/chat`, {
-    method: "POST",
-    headers: {
-      "content-type": "application/json"
-    },
-    signal: AbortSignal.timeout(request.config.provider.requestTimeoutSeconds * 1_000),
-    body: JSON.stringify({
-      model: request.model,
-      messages: request.messages,
-      stream: Boolean(request.stream)
-    })
+  const body = JSON.stringify({
+    model: request.model,
+    messages: request.messages,
+    stream: Boolean(request.stream)
   });
 
+  if (!request.stream) {
+    const response = await fetch(`${request.config.provider.ollamaHost}/api/chat`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      signal: AbortSignal.timeout(request.config.provider.requestTimeoutSeconds * 1_000),
+      body
+    });
+
+    if (!response.ok) {
+      throw new Error(`Ollama chat failed with HTTP ${response.status}.`);
+    }
+
+    const parsed = (await response.json()) as {
+      message?: { content?: string };
+      done_reason?: string;
+    };
+
+    return {
+      providerKind: "ollama",
+      model: request.model,
+      content: parsed.message?.content ?? "",
+      finishReason: parsed.done_reason
+    };
+  }
+
+  const controller = new AbortController();
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
+  const resetIdleTimer = () => {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+    }
+
+    idleTimer = setTimeout(() => {
+      controller.abort(new Error("Ollama stream timed out while waiting for the next chunk."));
+    }, request.config.provider.requestTimeoutSeconds * 1_000);
+    idleTimer.unref?.();
+  };
+
+  resetIdleTimer();
+
+  let response: Response;
+  try {
+    response = await fetch(`${request.config.provider.ollamaHost}/api/chat`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json"
+      },
+      signal: controller.signal,
+      body
+    });
+  } catch (error) {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+    }
+    throw error;
+  }
+
   if (!response.ok) {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+    }
     throw new Error(`Ollama chat failed with HTTP ${response.status}.`);
   }
 
-  if (request.stream) {
-    const streamed = await parseOllamaStream(response, request.onToken);
+  try {
+    const streamed = await parseOllamaStream(response, request.onToken, resetIdleTimer);
     return {
       providerKind: "ollama",
       model: request.model,
       content: streamed.content,
       finishReason: streamed.finishReason
     };
+  } finally {
+    if (idleTimer) {
+      clearTimeout(idleTimer);
+    }
   }
-
-  const parsed = (await response.json()) as {
-    message?: { content?: string };
-    done_reason?: string;
-  };
-
-  return {
-    providerKind: "ollama",
-    model: request.model,
-    content: parsed.message?.content ?? "",
-    finishReason: parsed.done_reason
-  };
 }
 
 async function requestAnthropicChat(request: ProviderChatRequest): Promise<ChatCompletionResult> {
@@ -264,6 +318,12 @@ export async function requestChatCompletion(request: ProviderChatRequest): Promi
 }
 
 export async function listOllamaModels(config: MicroClawConfig): Promise<OllamaModelSummary[]> {
+  const cacheKey = config.provider.ollamaHost;
+  const cached = ollamaModelCache.get(cacheKey);
+  if (cached && cached.expiresAt > Date.now()) {
+    return cached.models;
+  }
+
   const response = await fetch(`${config.provider.ollamaHost}/api/tags`, {
     signal: AbortSignal.timeout(config.provider.requestTimeoutSeconds * 1_000)
   });
@@ -276,14 +336,24 @@ export async function listOllamaModels(config: MicroClawConfig): Promise<OllamaM
     models?: Array<{ name?: string; size?: number }>;
   };
 
-  return (
+  const models =
     parsed.models
       ?.filter((item): item is { name: string; size?: number } => typeof item.name === "string" && item.name.length > 0)
       .map((item) => ({
         name: item.name,
         size: item.size
-      })) ?? []
-  );
+      })) ?? [];
+
+  ollamaModelCache.set(cacheKey, {
+    expiresAt: Date.now() + OLLAMA_MODEL_CACHE_TTL_MS,
+    models
+  });
+
+  return models;
+}
+
+export function _clearOllamaModelCacheForTests(): void {
+  ollamaModelCache.clear();
 }
 
 export function resolveOllamaModel(

@@ -12,6 +12,7 @@ import type {
 } from "../core/types.js";
 import { toErrorMessage, truncate } from "../core/utils.js";
 import { SessionStore } from "../memory/session-store.js";
+import { diagnoseProvider } from "../providers/provider-diagnostics.js";
 import { inspectSecretgateBoundary } from "../security/secretgate-boundary.js";
 import {
   appendAssistantConversation,
@@ -125,6 +126,28 @@ function formatWorkspaceSummary(root: string, config: MicroClawConfig, chatId: s
 
 function formatReminderNotification(reminder: AssistantReminder): string {
   return `Reminder: ${reminder.text}\nDue: ${formatReminderDate(reminder.dueAt)}`;
+}
+
+function isTtyWritable(output: Writable): boolean {
+  return Boolean((output as Writable & { isTTY?: boolean }).isTTY);
+}
+
+async function withProgressHeartbeat<T>(
+  task: () => Promise<T>,
+  notify: () => void,
+  intervalMs = 10_000
+): Promise<T> {
+  const timer = setInterval(() => {
+    notify();
+  }, intervalMs);
+
+  timer.unref?.();
+
+  try {
+    return await task();
+  } finally {
+    clearInterval(timer);
+  }
 }
 
 interface AssistantTuiState {
@@ -395,6 +418,7 @@ export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<
   });
   const session = await SessionStore.create(options.root, "assistant-tui");
   const boundary = inspectSecretgateBoundary(options.config, options.env);
+  let provider = await diagnoseProvider(options.config);
   const initialUser = await touchAssistantUser(options.root, options.config, chatId, {
     username: "local-tui",
     displayName: "Local TUI"
@@ -412,7 +436,8 @@ export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<
   await session.writeJson("assistant-tui-meta.json", {
     chatId,
     workspaceDir: getAssistantWorkspacePaths(options.root, options.config, chatId).relativeDir,
-    secretgateBoundary: boundary
+    secretgateBoundary: boundary,
+    provider
   });
 
   if (interactive) {
@@ -430,7 +455,8 @@ export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<
             { label: "Chat ID", value: chatId, tone: "secondary" },
             { label: "Workspace", value: getAssistantWorkspacePaths(options.root, options.config, chatId).relativeDir },
             { label: "Behavior", value: profile.behavior },
-            { label: "Secretgate", value: boundary.message, tone: boundary.ok ? "success" : "warning" }
+            { label: "Secretgate", value: boundary.message, tone: boundary.ok ? "success" : "warning" },
+            { label: "Provider", value: provider.message, tone: provider.ok ? "success" : "warning" }
           ]),
           "",
           ui.muted("Type /help for commands.")
@@ -444,6 +470,7 @@ export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<
           `Workspace: ${getAssistantWorkspacePaths(options.root, options.config, chatId).relativeDir}`,
           `Behavior: ${profile.behavior}`,
           `Secretgate: ${boundary.message}`,
+          `Provider: ${provider.message}`,
           "Type /help for commands."
         ].join("\n") + "\n"
       );
@@ -506,15 +533,79 @@ export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<
     });
     state.user = await refreshUser(options.root, options.config, state.chatId);
 
-    const reply = await generateDailyAssistantReply({
-      root: options.root,
-      config: options.config,
-      chatId: state.chatId,
-      user: state.user,
-      userInput: trimmed,
-      source: "user",
-      env: options.env
-    });
+    if (!provider.ok) {
+      provider = await diagnoseProvider(options.config);
+      if (!provider.ok) {
+        const providerError = `Provider not ready. ${provider.message}`;
+        state.turnCount += 1;
+        await recordAssistantMessage(options.root, options.config, state, providerError);
+        await persistState(state);
+
+        if (!options.jsonMode) {
+          output.write(`${providerError}\n`);
+        }
+        return;
+      }
+    }
+
+    const canStream = !options.jsonMode && options.config.runtime.stream && isTtyWritable(output);
+    if (!options.jsonMode) {
+      output.write(`${ui.formatProgress("thinking...")}\n`);
+    }
+
+    let streamedAnyToken = false;
+    let waitedSeconds = 0;
+    const reply = await withProgressHeartbeat(
+      () =>
+        generateDailyAssistantReply({
+          root: options.root,
+          config: options.config,
+          chatId: state.chatId,
+          user: state.user,
+          userInput: trimmed,
+          source: "user",
+          stream: canStream,
+          onToken: async (token) => {
+            if (!canStream || options.jsonMode) {
+              return;
+            }
+
+            if (!streamedAnyToken) {
+              output.write(ui.prompt("assistant"));
+            }
+            streamedAnyToken = true;
+            output.write(token);
+          },
+          onProgress: async (message) => {
+            if (options.jsonMode) {
+              return;
+            }
+
+            output.write(`${ui.formatProgress(message)}\n`);
+          },
+          env: options.env
+        }),
+      () => {
+        if (streamedAnyToken) {
+          return;
+        }
+
+        waitedSeconds += 10;
+        if (options.jsonMode) {
+          return;
+        }
+
+        output.write(`${ui.formatProgress(`still waiting for the model (${waitedSeconds}s)`)}\n`);
+      }
+    );
+
+    if (!options.jsonMode) {
+      if (canStream) {
+        output.write(streamedAnyToken ? "\n" : `${reply}\n`);
+      } else {
+        output.write(`${reply}\n`);
+      }
+    }
 
     state.turnCount += 1;
     await recordAssistantMessage(options.root, options.config, state, reply);
@@ -525,9 +616,6 @@ export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<
     });
     await persistState(state);
 
-    if (!options.jsonMode) {
-      output.write(`${reply}\n`);
-    }
   };
 
   try {
@@ -547,7 +635,15 @@ export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<
       try {
         while (true) {
           const line = await readline.question(ui.prompt("assistant"));
-          await handleLine(line);
+          try {
+            await handleLine(line);
+          } catch (error) {
+            if (error instanceof Error && error.message === "__MICRO_CLAW_ASSISTANT_EXIT__") {
+              throw error;
+            }
+
+            output.write(`${ui.formatProgress(`error: ${toErrorMessage(error)}`)}\n`);
+          }
         }
       } finally {
         readline.close();

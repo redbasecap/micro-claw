@@ -1,10 +1,8 @@
 import { Writable } from "node:stream";
-import type { AssistantUserState, ChatMessage, MicroClawConfig } from "../core/types.js";
+import type { AssistantUserState, ChatMessage, MicroClawConfig, ProviderKind } from "../core/types.js";
 import { resolveAgentProfile } from "../agent/agent-profile.js";
 import { runChatSession } from "../chat/chat-session.js";
 import { requestChatCompletion, listOllamaModels, resolveOllamaModel } from "../providers/chat-provider.js";
-import { routeTask } from "../router/model-router.js";
-import { scanRepository } from "../scanner/repo-scanner.js";
 import { truncate } from "../core/utils.js";
 import { formatAssistantUserContext } from "./store.js";
 import { readAssistantWorkspaceMemory } from "./workspace.js";
@@ -26,13 +24,43 @@ function shouldRouteToRepoAssistant(userInput: string): boolean {
   );
 }
 
-async function resolveModel(config: MicroClawConfig, desiredModel: string, providerKind: ReturnType<typeof routeTask>["providerKind"]): Promise<string> {
+async function resolveModel(
+  config: MicroClawConfig,
+  desiredModel: string,
+  providerKind: ProviderKind,
+  options?: { configuredModel?: string; preference?: "smallest" | "largest" }
+): Promise<string> {
   if (providerKind !== "ollama") {
-    return desiredModel || config.provider.model;
+    return desiredModel || options?.configuredModel || config.provider.model;
   }
 
   const available = await listOllamaModels(config);
-  return resolveOllamaModel(available, desiredModel, config.provider.model, "largest");
+  return resolveOllamaModel(
+    available,
+    desiredModel,
+    options?.configuredModel ?? config.provider.model,
+    options?.preference ?? "largest"
+  );
+}
+
+async function resolveAssistantReplyTarget(config: MicroClawConfig): Promise<{
+  providerKind: ProviderKind;
+  model: string;
+}> {
+  if (config.runtime.mode === "remote") {
+    return {
+      providerKind: config.provider.kind,
+      model: config.provider.model
+    };
+  }
+
+  return {
+    providerKind: "ollama",
+    model: await resolveModel(config, config.profiles.planner, "ollama", {
+      configuredModel: "qwen3:4b",
+      preference: "smallest"
+    })
+  };
 }
 
 function buildDailyMessages(
@@ -94,11 +122,15 @@ export async function generateDailyAssistantReply(options: {
   userInput: string;
   source?: "user" | "scheduled";
   sourceLabel?: string;
+  stream?: boolean;
+  onToken?: (token: string) => void | Promise<void>;
+  onProgress?: (message: string) => void | Promise<void>;
   env?: NodeJS.ProcessEnv;
 }): Promise<string> {
   const source = options.source ?? "user";
 
   if (shouldRouteToRepoAssistant(options.userInput)) {
+    await options.onProgress?.("delegating to the repo assistant");
     const chat = await runChatSession({
       root: options.root,
       config: options.config,
@@ -115,18 +147,18 @@ export async function generateDailyAssistantReply(options: {
     return chat.lastAssistantMessage ?? "The repo task finished without a final assistant message.";
   }
 
-  const repoSummary = await scanRepository(options.root);
-  const route = routeTask(options.config, repoSummary, options.userInput);
   const profile = await resolveAgentProfile({
     root: options.root,
     promptIfMissing: false
   });
+  await options.onProgress?.("loading workspace memory");
   const workspaceMemory = await readAssistantWorkspaceMemory(options.root, options.config, options.chatId);
-  const model = await resolveModel(options.config, route.coderModel, route.providerKind);
+  const target = await resolveAssistantReplyTarget(options.config);
+  await options.onProgress?.(`requesting a reply from ${target.providerKind}`);
   const completion = await requestChatCompletion({
     config: options.config,
-    providerKind: route.providerKind,
-    model,
+    providerKind: target.providerKind,
+    model: target.model,
     messages: buildDailyMessages(
       profile,
       options.user,
@@ -136,7 +168,8 @@ export async function generateDailyAssistantReply(options: {
       source,
       options.sourceLabel
     ),
-    stream: false
+    stream: options.stream === true,
+    onToken: options.onToken
   });
 
   return completion.content.trim() || "I could not produce a useful reply.";
