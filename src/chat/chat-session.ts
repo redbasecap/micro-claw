@@ -1,6 +1,8 @@
 import { Writable } from "node:stream";
 import { createInterface } from "node:readline/promises";
 import process from "node:process";
+import path from "node:path";
+import { existsSync, readFileSync, mkdirSync, writeFileSync } from "node:fs";
 import { resolveAgentProfile } from "../agent/agent-profile.js";
 import { createCliUi, writeHero, type CliTone } from "../cli-ui.js";
 import type {
@@ -70,7 +72,14 @@ interface FinalInstruction {
   content: string;
 }
 
-type AgentInstruction = ToolInstruction | FinalInstruction;
+interface PlanInstruction {
+  type: "plan";
+  summary: string;
+  steps: string[];
+  mode: "plan" | "execute";
+}
+
+type AgentInstruction = ToolInstruction | FinalInstruction | PlanInstruction;
 
 export interface RunChatSessionOptions {
   root: string;
@@ -236,38 +245,51 @@ function buildToolPrompt(
   repoSummary: RepoSummary,
   route: RouterDecision,
   boundaryMessage: string,
-  agentProfile: AgentProfile
+  agentProfile: AgentProfile,
+  brainContext?: BrainContext
 ): string {
+  const brainLearning = brainContext ? buildBrainContext(brainContext) : "";
+  const planningGuidance = brainContext ? buildPlanningPrompt("", brainContext) : "";
+  
   return [
-    `You are ${agentProfile.name} operating in tool mode.`,
+    `You are ${agentProfile.name} - an intelligent coding assistant with a dynamic brain.`,
     `Repo root: ${root}`,
     `Secretgate boundary: ${boundaryMessage}`,
     `Provider path: ${route.providerKind}`,
-    `Behavior preference: ${agentProfile.behavior}`,
-    "You can use tools and must never pretend that a command ran or a file changed.",
-    "When the task needs actions, respond with exactly one JSON object and nothing else.",
-    "Tool schema:",
+    `Behavior: ${agentProfile.behavior}`,
+    "You NEVER pretend that commands ran or files changed unless they actually did.",
+    brainLearning,
+    "",
+    "🎯 PLANNING SKILLS:",
+    "1. INSPECT: Always understand the current state first (list_files, read_file, grep)",
+    "2. ANALYZE: Understand what needs to change and plan the minimal steps",
+    "3. EXECUTE: Make changes, prefer focused edits over rewrites",
+    "4. VERIFY: Always test/run the result to confirm it works",
+    "5. REFLECT: If it fails, analyze why and try a different approach",
+    planningGuidance,
+    "",
+    "When the task needs actions, respond with exactly one JSON object:",
     '{"type":"tool","tool":"list_files","input":{"directory":".","maxResults":50}}',
     '{"type":"tool","tool":"read_file","input":{"path":"src/app.ts"}}',
-    '{"type":"tool","tool":"search","input":{"query":"snake","maxResults":20}}',
-    '{"type":"tool","tool":"grep","input":{"query":"TODO","maxResults":50}}',
-    '{"type":"tool","tool":"write_file","input":{"path":"TEST/snake.py","content":"print(\\"hi\\")\\n"}}',
-    '{"type":"tool","tool":"replace_text","input":{"path":"src/app.ts","search":"old","replace":"new","expectedReplacements":1}}',
-    '{"type":"tool","tool":"delete_file","input":{"path":"tmp.txt"}}',
-    '{"type":"tool","tool":"create_skill","input":{"name":"curl-checker","description":"Use when the user needs curl-based endpoint checks.","instructions":"# curl checker\\n\\n1. Read the target endpoint details.\\n2. Run focused curl commands.\\n3. Summarize the response and failures.","scripts":[{"name":"run.sh","content":"#!/usr/bin/env bash\\nset -euo pipefail\\ncurl -fsSL \\"$1\\"\\n","executable":true}]}}',
-    '{"type":"tool","tool":"shell","input":{"command":"python3 TEST/snake.py"}}',
-    '{"type":"tool","tool":"shell","input":{"cwd":"TEST","command":"pwd && ls"}}',
+    '{"type":"tool","tool":"search","input":{"query":"keyword","maxResults":20}}',
+    '{"type":"tool","tool":"grep","input":{"query":"TODO|FIXME","maxResults":50}}',
+    '{"type":"tool","tool":"write_file","input":{"path":"new.py","content":"print(1)"}}',
+    '{"type":"tool","tool":"replace_text","input":{"path":"file.ts","search":"old","replace":"new"}}',
+    '{"type":"tool","tool":"shell","input":{"command":"python file.py"}}',
+    '{"type":"tool","tool":"shell","input":{"cwd":"dir","command":"npm test"}}',
     '{"type":"tool","tool":"git_status","input":{}}',
     '{"type":"tool","tool":"git_diff","input":{}}',
-    'Final answer schema: {"type":"final","content":"what you did, what changed, and what was verified"}',
-    "Rules:",
-    "- Prefer read_file, list_files, search, and grep before writing.",
-    "- Prefer write_file for new files and replace_text for focused edits.",
-    "- Prefer create_skill when the user asks for a reusable skill, workflow, or tool folder.",
-    "- Use list_files when the user wants to inspect everything or all files.",
-    "- Use grep when the user explicitly asks for grep/rg or wants text matches across many files.",
-    "- Keep using tools until the requested goal exists and the evidence is explicit.",
-    "- For edit tasks, inspect first, then change files, then verify with another tool when possible.",
+    'Plan mode (for complex tasks): {"type":"plan","summary":"analysis","steps":["1. inspect","2. create","3. test"],"mode":"plan"}',
+    'Execute mode: {"type":"plan","summary":"now executing","steps":["step1","step2"],"mode":"execute"}',
+    'Final answer: {"type":"final","content":"Completed task: X. Changes: Y. Verified: Z."}',
+    "",
+    "⚡ SMART RULES:",
+    "- For BUILD/RUN tasks: write file → run it → fix errors → run again until it works",
+    "- For EDIT tasks: read file → make change → run tests or lint",
+    "- For CREATE tasks: inspect structure → create minimal viable → test",
+    "- Always execute/verify the final result",
+    "- If a tool fails, try a different approach",
+    "- Use shell for running python/js/go/rust scripts",
     "- Do not stop after a single exploratory tool if the task still requires creation, editing, execution, or repo-wide evidence.",
     "- Use shell for execution, tests, curl, package installation, directory creation, and commands that need `cd`, pipes, `grep`, or `rg`.",
     "- The shell tool can receive `cwd` for folder-specific work, or you can use `cd <dir> && ...` inside the command.",
@@ -275,10 +297,333 @@ function buildToolPrompt(
     "- After a tool result, decide the next best tool or return a final answer.",
     "- In the final answer, mention only files changed or commands run that appear in tool results from this loop.",
     "- Do not claim that a repo file changed just because it was present in the repo summary.",
+    brainLearning,
     "",
     "Repo summary:",
     formatRepoSummary(repoSummary)
   ].join("\n");
+}
+
+interface BrainContext {
+  successfulPatterns: string[];
+  failedPatterns: string[];
+  filesAccessed: string[];
+  commandsExecuted: string[];
+  turnCount: number;
+  insights: BrainInsight[];
+  workflowSteps: string[];
+  lastTask?: string;
+  taskHistory: string[];
+  intelligenceScore: number;
+}
+
+interface BrainInsight {
+  key: string;
+  value: string;
+  strength: number;
+  expiresAt: number;
+  learnedFrom?: string;
+}
+
+interface PersistentBrain {
+  version: number;
+  updatedAt: string;
+  skills: BrainSkill[];
+  commands: BrainCommand[];
+  patterns: BrainPattern[];
+  totalLearnings: number;
+}
+
+interface BrainSkill {
+  name: string;
+  description: string;
+  commands: string[];
+  examples: string[];
+  learnedAt: string;
+  useCount: number;
+}
+
+interface BrainCommand {
+  command: string;
+  description: string;
+  successRate: number;
+  lastUsed: string;
+  learnedFrom: string;
+  useCount: number;
+}
+
+interface BrainPattern {
+  trigger: string;
+  response: string;
+  successRate: number;
+  useCount: number;
+}
+
+const MAX_INSIGHTS = 20;
+const INSIGHT_TTL_MS = 60 * 60 * 1000;
+const BRAIN_FILE = ".micro-claw/brain.json";
+const BRAIN_VERSION = 1;
+
+function createBrainContext(initialTask?: string): BrainContext {
+  return {
+    successfulPatterns: [],
+    failedPatterns: [],
+    filesAccessed: [],
+    commandsExecuted: [],
+    turnCount: 0,
+    insights: [],
+    workflowSteps: [],
+    lastTask: initialTask,
+    taskHistory: initialTask ? [initialTask] : [],
+    intelligenceScore: 0.5
+  };
+}
+
+function loadPersistentBrain(root: string): PersistentBrain {
+  try {
+    const brainPath = path.join(root, BRAIN_FILE);
+    if (existsSync(brainPath)) {
+      const content = readFileSync(brainPath, "utf-8");
+      return JSON.parse(content);
+    }
+  } catch {}
+  
+  return {
+    version: BRAIN_VERSION,
+    updatedAt: new Date().toISOString(),
+    skills: [],
+    commands: [],
+    patterns: [],
+    totalLearnings: 0
+  };
+}
+
+function savePersistentBrain(root: string, brain: PersistentBrain): void {
+  try {
+    const brainDir = path.join(root, ".micro-claw");
+    if (!existsSync(brainDir)) {
+      mkdirSync(brainDir, { recursive: true });
+    }
+    brain.updatedAt = new Date().toISOString();
+    writeFileSync(path.join(brainDir, BRAIN_FILE), JSON.stringify(brain, null, 2));
+  } catch (e) {
+    // Ignore save errors
+  }
+}
+
+function autoLearnFromTask(
+  root: string,
+  task: string,
+  usedTools: ToolName[],
+  executedCommands: string[],
+  touchedFiles: string[],
+  success: boolean
+): void {
+  const brain = loadPersistentBrain(root);
+  
+  if (executedCommands.length > 0) {
+    for (const cmd of executedCommands) {
+      if (cmd.includes("curl")) {
+        learnSkill(brain, "curl", "HTTP requests with curl", cmd);
+      }
+      if (cmd.includes("grep") || cmd.includes("rg")) {
+        learnSkill(brain, "grep/rg", "Text search in files", cmd);
+      }
+      if (cmd.includes("npm") || cmd.includes("pnpm")) {
+        learnSkill(brain, "npm/pnpm", "Node package management", cmd);
+      }
+      if (cmd.includes("python")) {
+        learnSkill(brain, "python", "Python scripting", cmd);
+      }
+      if (cmd.includes("git")) {
+        learnSkill(brain, "git", "Version control", cmd);
+      }
+      
+      const existingCmd = brain.commands.find(c => c.command === cmd);
+      if (existingCmd) {
+        existingCmd.useCount++;
+        existingCmd.successRate = success ? Math.min(1, existingCmd.successRate + 0.1) : existingCmd.successRate;
+        existingCmd.lastUsed = new Date().toISOString();
+      } else {
+        brain.commands.push({
+          command: cmd,
+          description: extractCommandPurpose(cmd),
+          successRate: success ? 0.8 : 0.3,
+          lastUsed: new Date().toISOString(),
+          learnedFrom: task
+        });
+      }
+    }
+  }
+  
+  if (touchedFiles.length > 0) {
+    const ext = touchedFiles[0]?.split(".").pop() || "";
+    if (ext === "py") learnPattern(brain, "python", "Use python for scripting tasks");
+    if (ext === "ts" || ext === "js") learnPattern(brain, "typescript", "Use TypeScript for Node.js tasks");
+  }
+  
+  if (task.toLowerCase().includes("search") && task.toLowerCase().includes("internet")) {
+    learnSkill(brain, "curl-http", "Internet requests with curl -s <url>", "curl -s https://api.example.com");
+  }
+  
+  if (task.toLowerCase().includes("test")) {
+    learnPattern(brain, "testing", "Run tests to verify changes work");
+  }
+  
+  brain.totalLearnings++;
+  savePersistentBrain(root, brain);
+}
+
+function learnSkill(brain: PersistentBrain, name: string, description: string, example: string): void {
+  const existing = brain.skills.find(s => s.name === name);
+  if (existing) {
+    existing.useCount++;
+    if (!existing.examples.includes(example)) {
+      existing.examples.push(example);
+    }
+  } else {
+    brain.skills.push({
+      name,
+      description,
+      commands: [example],
+      examples: [example],
+      learnedAt: new Date().toISOString(),
+      useCount: 1
+    });
+  }
+}
+
+function learnPattern(brain: PersistentBrain, trigger: string, response: string): void {
+  const existing = brain.patterns.find(p => p.trigger === trigger);
+  if (existing) {
+    existing.useCount++;
+  } else {
+    brain.patterns.push({
+      trigger,
+      response,
+      successRate: 0.7,
+      useCount: 1
+    });
+  }
+}
+
+function extractCommandPurpose(cmd: string): string {
+  if (cmd.includes("curl")) return "HTTP request";
+  if (cmd.includes("grep")) return "Text search";
+  if (cmd.includes("npm test")) return "Run tests";
+  if (cmd.includes("npm run")) return "Run npm script";
+  if (cmd.includes("python")) return "Python execution";
+  if (cmd.includes("git")) return "Git version control";
+  if (cmd.includes("mkdir")) return "Create directory";
+  if (cmd.includes("rm")) return "Remove file/directory";
+  return "Shell command";
+}
+
+function buildBrainContext(brain: BrainContext): string {
+  if (brain.turnCount < 1) return "";
+  
+  const lines: string[] = [];
+  lines.push("\n🧠 BRAIN CONTEXT:");
+  
+  if (brain.turnCount >= 2 && brain.intelligenceScore > 0.3) {
+    lines.push(`Session intelligence: ${Math.round(brain.intelligenceScore * 100)}%`);
+  }
+  
+  if (brain.insights.length > 0) {
+    const activeInsights = brain.insights
+      .filter(i => i.expiresAt > Date.now())
+      .sort((a, b) => b.strength - a.strength)
+      .slice(0, 5);
+    
+    if (activeInsights.length > 0) {
+      lines.push("Learned insights:");
+      for (const insight of activeInsights) {
+        lines.push(`  • ${insight.key}: ${insight.value}`);
+      }
+    }
+  }
+  
+  if (brain.taskHistory.length > 1) {
+    const recent = brain.taskHistory.slice(-3);
+    lines.push(`Recent tasks: ${recent.join(" → ")}`);
+  }
+  
+  if (brain.workflowSteps.length > 2) {
+    lines.push(`Effective workflow: ${brain.workflowSteps.slice(-3).join(" → ")}`);
+  }
+  
+  if (brain.failedPatterns.length > 0) {
+    const critical = brain.failedPatterns.slice(-2);
+    lines.push(`⚠️ Avoid: ${critical.join(", ")}`);
+  }
+  
+  return lines.join("\n");
+}
+
+function addInsight(brain: BrainContext, key: string, value: string): void {
+  const existing = brain.insights.findIndex(i => i.key === key);
+  if (existing >= 0) {
+    brain.insights[existing].strength = Math.min(1, brain.insights[existing].strength + 0.1);
+    brain.insights[existing].value = value;
+    brain.insights[existing].expiresAt = Date.now() + INSIGHT_TTL_MS;
+  } else {
+    brain.insights.push({
+      key,
+      value,
+      strength: 0.5,
+      expiresAt: Date.now() + INSIGHT_TTL_MS
+    });
+  }
+  
+  if (brain.insights.length > MAX_INSIGHTS) {
+    brain.insights.sort((a, b) => b.strength - a.strength);
+    brain.insights = brain.insights.slice(0, MAX_INSIGHTS);
+  }
+}
+
+function updateIntelligence(brain: BrainContext, success: boolean, hasInsight: boolean): void {
+  const delta = success ? 0.05 : -0.02;
+  const insightBonus = hasInsight ? 0.02 : 0;
+  brain.intelligenceScore = Math.max(0.1, Math.min(1, brain.intelligenceScore + delta + insightBonus));
+}
+
+function learnFromTask(brain: BrainContext, task: string, tools: ToolName[], success: boolean): void {
+  if (task !== brain.lastTask) {
+    brain.taskHistory.push(task);
+    brain.lastTask = task;
+  }
+  
+  const toolChain = tools.slice(-3).join(" → ");
+  if (toolChain && success) {
+    addInsight(brain, "workflow", toolChain);
+    brain.workflowSteps.push(toolChain);
+  }
+  
+  updateIntelligence(brain, success, brain.insights.length > 0);
+  
+  brain.insights = brain.insights.filter(i => i.expiresAt > Date.now());
+}
+
+function buildPlanningPrompt(task: string, brain?: BrainContext): string {
+  const lines: string[] = [];
+  lines.push("\n📋 PLANNING PHASE:");
+  lines.push("For this task, first create a plan with:");
+  lines.push("1. Inspect - what files/structure exist?");
+  lines.push("2. Analyze - what needs to change?");
+  lines.push("3. Execute - make the changes");
+  lines.push("4. Verify - run/test the result");
+  
+  if (brain && brain.insights.length > 0) {
+    lines.push("\n💡 From past experience:");
+    const relevant = brain.insights.filter(i => 
+      i.key === "workflow" || i.key === "file-structure"
+    ).slice(0, 2);
+    for (const insight of relevant) {
+      lines.push(`  • ${insight.value}`);
+    }
+  }
+  
+  return lines.join("\n");
 }
 
 function extractJsonObject(text: string): string | undefined {
@@ -334,11 +679,29 @@ function extractJsonObject(text: string): string | undefined {
 }
 
 function repairJsonObject(source: string): string {
-  return source
+  let repaired = source
     .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)"\s*:/g, '$1"$2":')
     .replace(/([{,]\s*)"([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
     .replace(/([{,]\s*)([A-Za-z_][A-Za-z0-9_]*)\s*:/g, '$1"$2":')
     .replace(/,\s*([}\]])/g, "$1");
+  
+  repaired = repaired.replace(/"tool"\s*:\s*"(\w+)"/g, (match, toolName) => {
+    const validTools = ["list_files", "read_file", "write_file", "replace_text", "delete_file", "search", "grep", "shell", "git_status", "git_diff", "patch", "create_skill"];
+    if (!validTools.includes(toolName)) {
+      if (toolName === "new_file" || toolName === "create_file") return '"tool":"write_file"';
+      if (toolName === "edit_file" || toolName === "modify") return '"tool":"replace_text"';
+      if (toolName === "run" || toolName === "exec" || toolName === "execute") return '"tool":"shell"';
+      if (toolName === "find" || toolName === "search") return '"tool":"search"';
+    }
+    return match;
+  });
+  
+  if (repaired.includes('"type":"tool"') && !repaired.includes('"type":"write_file"') && 
+      (repaired.includes('"new_file"') || repaired.includes('"create_file"'))) {
+    repaired = repaired.replace(/"type":"tool"\s*,\s*"tool"\s*:\s*"(?:new_file|create_file)"/g, '"type":"tool","tool":"write_file"');
+  }
+  
+  return repaired;
 }
 
 function parseAgentInstruction(content: string): AgentInstruction | undefined {
@@ -362,6 +725,15 @@ function parseAgentInstruction(content: string): AgentInstruction | undefined {
     return {
       type: "final",
       content: parsed.content
+    };
+  }
+
+  if (parsed.type === "plan" && Array.isArray(parsed.steps) && typeof parsed.summary === "string") {
+    return {
+      type: "plan",
+      summary: parsed.summary as string,
+      steps: parsed.steps as string[],
+      mode: (parsed.mode as "plan" | "execute") || "plan"
     };
   }
 
@@ -590,6 +962,7 @@ function shouldKeepWorking(
   const hasAction = usedTools.some((tool) =>
     ["write_file", "replace_text", "delete_file", "patch", "shell", "create_skill"].includes(tool)
   );
+  const hasShellExecution = usedTools.includes("shell") || executedCommands.length > 0;
   const wantsSearch = /\b(search|scan|grep|rg|find|look for|suche|durchsuche|durchsuchen|finde)\b/i.test(userInput);
   const wantsExplicitGrep = /\b(grep|rg)\b/i.test(userInput);
   const wantsChange =
@@ -600,6 +973,11 @@ function shouldKeepWorking(
     /\b(all|everything|entire|whole|repo|repository|project|overview|summary|readme|documentation|alle|alles|dateien|datei|projekt|readme)\b/i.test(
       userInput
     );
+  const wantsBuild =
+    /\b(build|run|execute|test|compile|start|launch|install|deploy|build|bauen|ausführen|starten|testen)\b/i.test(userInput);
+  const wantsPython = /\b(python|py|skript|script)\b/i.test(userInput);
+  const wantsGame = /\b(game|spiel|game)\b/i.test(userInput);
+  const isExecutable = wantsBuild || wantsGame || wantsPython;
 
   if (wantsExplicitGrep && !usedTools.includes("grep") && !executedCommands.some((command) => /\b(grep|rg)\b/.test(command))) {
     return "The user explicitly asked for grep or rg evidence.";
@@ -615,6 +993,14 @@ function shouldKeepWorking(
 
   if ((wantsChange || wantsBroadCoverage) && uniqueTools.length < 2) {
     return "Use at least two different tools so the result is backed by inspection plus action or verification.";
+  }
+
+  if (isExecutable && touchedFiles.length > 0 && !hasShellExecution) {
+    const ext = touchedFiles[0]?.split(".").pop();
+    if (["py", "js", "ts", "sh", "rb", "go", "rs"].includes(ext || "")) {
+      return "The task involves running an executable file - run it to verify it works.";
+    }
+    return "The task requires running or testing the created file.";
   }
 
   return undefined;
@@ -901,11 +1287,16 @@ async function executeAgentTurn(
   const touchedFiles: string[] = [];
   const executedCommands: string[] = [];
   const failures: string[] = [];
+  const successfulPatterns: string[] = [];
+  const failedPatterns: string[] = [];
   let invalidJsonReplies = 0;
-  const maxToolSteps = 12;
+  const maxToolSteps = 20;
+  const maxJsonRetries = 4;
+
+  const brainContext = createBrainContext(userInput);
 
   for (let step = 0; step < maxToolSteps; step += 1) {
-    writeProgress(output, echoResponse, `planning step ${step + 1}/${maxToolSteps}`, ui);
+    writeProgress(output, echoResponse, `step ${step + 1}/${maxToolSteps}`, ui);
     let waitSeconds = 0;
     const completion = await withProgressHeartbeat(
       () =>
@@ -916,7 +1307,7 @@ async function executeAgentTurn(
           messages: [
             {
               role: "system",
-              content: buildToolPrompt(root, state.repoSummary, route, boundaryMessage, state.agentProfile)
+              content: buildToolPrompt(root, state.repoSummary, route, boundaryMessage, state.agentProfile, brainContext)
             },
             ...workMessages
           ],
@@ -924,7 +1315,7 @@ async function executeAgentTurn(
         }),
       () => {
         waitSeconds += 10;
-        writeProgress(output, echoResponse, `waiting for model response (${waitSeconds}s)`, ui);
+        writeProgress(output, echoResponse, `waiting for model (${waitSeconds}s)`, ui);
       }
     );
 
@@ -932,24 +1323,23 @@ async function executeAgentTurn(
 
     if (!instruction) {
       invalidJsonReplies += 1;
-      if (invalidJsonReplies < 3) {
-        writeProgress(output, echoResponse, "model reply was not valid tool JSON; requesting a corrected tool reply", ui);
+      if (invalidJsonReplies < maxJsonRetries) {
+        writeProgress(output, echoResponse, `invalid JSON (attempt ${invalidJsonReplies}/${maxJsonRetries}); retrying...`, ui);
         workMessages.push({
           role: "assistant",
           content: completion.content
         });
         workMessages.push({
           role: "user",
-          content:
-            "Your last reply was invalid. Reply again with exactly one valid JSON object that matches the tool schema and continue the task."
+          content: `INVALID. You MUST respond with EXACTLY ONE of these formats:\n{"type":"tool","tool":"shell","input":{"command":"echo hello"}}\n{"type":"final","content":"your answer"}\n\nDo NOT include any other text. Only the JSON.`
         });
         continue;
       }
 
-      writeProgress(output, echoResponse, "model reply stayed invalid; returning raw output", ui);
+      writeProgress(output, echoResponse, "giving up on JSON, using raw output", ui);
       finalCompletion = {
         ...completion,
-        content: `Tool-mode reply was not valid JSON. Raw model output:\n\n${completion.content}`
+        content: completion.content
       };
       break;
     }
@@ -977,6 +1367,32 @@ async function executeAgentTurn(
       break;
     }
 
+    if (instruction.type === "plan") {
+      writeProgress(output, echoResponse, `planning: ${instruction.summary}`, ui);
+      for (const step of instruction.steps) {
+        writeAgentNote(output, echoResponse, `  - ${step}`, ui, "muted");
+      }
+      
+      if (instruction.mode === "execute") {
+        writeProgress(output, echoResponse, "executing plan...", ui);
+      } else {
+        workMessages.push({
+          role: "assistant",
+          content: JSON.stringify(instruction)
+        });
+        workMessages.push({
+          role: "user",
+          content: `Execute this plan step by step. For each step, respond with: {"type":"tool","tool":"<tool>","input":{...}}`
+        });
+        continue;
+      }
+    }
+
+    if (instruction.type !== "tool") {
+      writeProgress(output, echoResponse, "unknown instruction type, skipping", ui);
+      continue;
+    }
+
     writeProgress(output, echoResponse, `running ${summarizeToolInstruction(instruction)}`, ui);
     const toolCall: ToolCall = {
       tool: instruction.tool,
@@ -989,16 +1405,22 @@ async function executeAgentTurn(
     for (const previewLine of summarizeToolPreview(toolResult)) {
       writeAgentNote(output, echoResponse, previewLine, ui, toolResult.ok ? "muted" : "warning");
     }
-    writeAgentNote(output, echoResponse, `tools so far: ${unique(usedTools).join(", ")}`, ui, "muted");
+    writeAgentNote(output, echoResponse, `tools: ${unique(usedTools).join(", ")}`, ui, "muted");
 
     if (!toolResult.ok) {
       failures.push(`${instruction.tool}: ${toolResult.error ?? toolResult.summary}`);
+      failedPatterns.push(`${instruction.tool} failed - ${truncate(toolResult.error ?? "unknown", 50)}`);
+    } else {
+      successfulPatterns.push(`${instruction.tool} succeeded`);
     }
 
     if (instruction.tool === "shell") {
       const command = String(instruction.input.command ?? "").trim();
       if (command) {
         executedCommands.push(command);
+        if (toolResult.ok) {
+          brainContext.commandsExecuted.push(command);
+        }
       }
     }
 
@@ -1007,12 +1429,27 @@ async function executeAgentTurn(
       if (query) {
         executedCommands.push(`grep ${query}`);
       }
+      if (toolResult.ok) {
+        addInsight(brainContext, "search-pattern", query);
+      }
     }
 
     if (instruction.tool === "write_file" || instruction.tool === "replace_text" || instruction.tool === "delete_file") {
       const targetPath = String(instruction.input.path ?? "").trim();
       if (targetPath) {
         touchedFiles.push(targetPath);
+        brainContext.filesAccessed.push(targetPath);
+        if (toolResult.ok) {
+          const ext = targetPath.split(".").pop() || "";
+          addInsight(brainContext, "file-structure", `${ext}: ${targetPath}`);
+        }
+      }
+    }
+
+    if (instruction.tool === "read_file") {
+      const targetPath = String(instruction.input.path ?? "").trim();
+      if (targetPath) {
+        brainContext.filesAccessed.push(targetPath);
       }
     }
 
@@ -1020,6 +1457,7 @@ async function executeAgentTurn(
       for (const file of toolResult.data) {
         if (typeof file === "string") {
           touchedFiles.push(file);
+          brainContext.filesAccessed.push(file);
         }
       }
     }
@@ -1030,9 +1468,15 @@ async function executeAgentTurn(
         for (const file of data.createdFiles) {
           if (typeof file === "string") {
             touchedFiles.push(file);
+            brainContext.filesAccessed.push(file);
           }
         }
       }
+    }
+    
+    if (instruction.tool === "shell" && toolResult.ok) {
+      const cmd = String(instruction.input.command ?? "").split(" ")[0];
+      addInsight(brainContext, "shell-command", cmd);
     }
 
     workMessages.push({
@@ -1064,7 +1508,11 @@ async function executeAgentTurn(
       state.repoSummary = await scanRepository(root);
       await state.session.writeJson("repo-summary.json", state.repoSummary);
     }
+    
+    brainContext.turnCount++;
   }
+
+  learnFromTask(brainContext, userInput, usedTools, failures.length === 0);
 
   const completion =
     finalCompletion ??
@@ -1077,18 +1525,24 @@ async function executeAgentTurn(
   if (echoResponse) {
     writeProgress(output, echoResponse, "sending final answer", ui);
     
-    if (finalCompletion && finalCompletion.content.trim().length > 0) {
-      output.write(`${finalCompletion.content}\n`);
-      
-      if (usedTools.length > 0) {
-        const loopSummary = buildToolLoopSummary(usedTools, touchedFiles, executedCommands, failures);
-        output.write(`\n${loopSummary}\n`);
-      }
-    } else if (usedTools.length > 0 || touchedFiles.length > 0 || executedCommands.length > 0 || failures.length > 0) {
+    let finalContent = completion.content;
+    if (usedTools.length > 0 || touchedFiles.length > 0 || executedCommands.length > 0 || failures.length > 0) {
       const loopSummary = buildToolLoopSummary(usedTools, touchedFiles, executedCommands, failures);
-      output.write(`${loopSummary}\n`);
+      if (finalContent.trim().length > 0) {
+        finalContent = `${finalContent}\n\n${loopSummary}`;
+      } else {
+        finalContent = loopSummary;
+      }
+    }
+    output.write(`${finalContent}\n`);
+  }
+  
+  if (usedTools.length > 0 || touchedFiles.length > 0 || executedCommands.length > 0 || failures.length > 0) {
+    const loopSummary = buildToolLoopSummary(usedTools, touchedFiles, executedCommands, failures);
+    if (completion.content.trim().length > 0) {
+      completion.content = `${loopSummary}\n\nFinal result: ${completion.content}`;
     } else {
-      output.write(`Tool loop completed with no changes.\n`);
+      completion.content = loopSummary;
     }
   }
 
