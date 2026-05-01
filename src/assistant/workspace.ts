@@ -1,6 +1,12 @@
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
-import type { AssistantReminder, AssistantTodo, AssistantUserState, MicroClawConfig } from "../core/types.js";
+import type {
+  AssistantMemoryEntry,
+  AssistantReminder,
+  AssistantTodo,
+  AssistantUserState,
+  MicroClawConfig
+} from "../core/types.js";
 import { assertWithinRoot, pathExists } from "../core/utils.js";
 import { formatReminderDate } from "./reminder-parser.js";
 
@@ -9,6 +15,7 @@ const OVERVIEW_FILE_NAME = "README.md";
 const NOTES_FILE_NAME = "notes.md";
 const TODOS_FILE_NAME = "todos.md";
 const REMINDERS_FILE_NAME = "reminders.md";
+const MEMORIES_FILE_NAME = "memories.md";
 
 function toWorkspaceSlug(chatId: string): string {
   const normalized = chatId.trim().replace(/[^A-Za-z0-9_-]+/g, "_").replace(/^_+|_+$/g, "");
@@ -21,6 +28,11 @@ function formatTodo(todo: AssistantTodo): string {
 
 function formatReminder(reminder: AssistantReminder): string {
   return `${reminder.id.slice(0, 8)} [${reminder.deliveredAt ? "sent" : "pending"}] ${formatReminderDate(reminder.dueAt)} ${reminder.text}`;
+}
+
+function formatMemory(memory: AssistantMemoryEntry): string {
+  const expires = memory.expiresAt ? ` expires ${memory.expiresAt}` : "";
+  return `${memory.id.slice(-8)} [${memory.kind}/${memory.source}/${memory.confidence.toFixed(2)}] ${memory.text}${expires}`;
 }
 
 function buildListMarkdown(title: string, lines: string[], emptyLine: string): string {
@@ -46,6 +58,8 @@ function buildMemoryTemplate(user: AssistantUserState): string {
     "",
     "## Persistent Memory",
     "- Add durable facts here.",
+    "",
+    "Generated curated memories are mirrored in memories.md.",
     ""
   ].join("\n");
 }
@@ -73,6 +87,7 @@ function buildOverview(user: AssistantUserState, relativeDir: string): string {
     `- ${NOTES_FILE_NAME}`,
     `- ${TODOS_FILE_NAME}`,
     `- ${REMINDERS_FILE_NAME}`,
+    `- ${MEMORIES_FILE_NAME}`,
     ""
   ].join("\n");
 }
@@ -85,6 +100,7 @@ export interface AssistantWorkspacePaths {
   notesFile: string;
   todosFile: string;
   remindersFile: string;
+  memoriesFile: string;
 }
 
 export function getAssistantWorkspacePaths(
@@ -102,7 +118,8 @@ export function getAssistantWorkspacePaths(
     overviewFile: path.join(dir, OVERVIEW_FILE_NAME),
     notesFile: path.join(dir, NOTES_FILE_NAME),
     todosFile: path.join(dir, TODOS_FILE_NAME),
-    remindersFile: path.join(dir, REMINDERS_FILE_NAME)
+    remindersFile: path.join(dir, REMINDERS_FILE_NAME),
+    memoriesFile: path.join(dir, MEMORIES_FILE_NAME)
   };
 }
 
@@ -149,6 +166,15 @@ export async function syncAssistantWorkspace(
       "Reminders",
       user.reminders.map((reminder) => formatReminder(reminder)),
       "No reminders saved yet."
+    ),
+    "utf8"
+  );
+  await writeFile(
+    paths.memoriesFile,
+    buildListMarkdown(
+      "Curated Memories",
+      user.memories.map((memory) => formatMemory(memory)),
+      "No curated memories saved yet."
     ),
     "utf8"
   );

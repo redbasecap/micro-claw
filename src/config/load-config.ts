@@ -83,6 +83,10 @@ function validateConfig(config: MicroClawConfig): MicroClawConfig {
     throw new Error("assistant.maxRemindersPerUser must be positive");
   }
 
+  if (config.assistant.maxCuratedMemoriesPerUser <= 0) {
+    throw new Error("assistant.maxCuratedMemoriesPerUser must be positive");
+  }
+
   if (config.telegram.pollIntervalMs <= 0) {
     throw new Error("telegram.pollIntervalMs must be positive");
   }

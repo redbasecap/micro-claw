@@ -4,7 +4,10 @@ import path from "node:path";
 import process from "node:process";
 import { formatAgentProfile, loadAgentProfile, resolveAgentProfile, saveAgentProfile } from "./agent/agent-profile.js";
 import { queueAgentTask, refreshAgentStatus, runResidentAgent } from "./agent/resident-agent.js";
+import { buildAssistantBriefing } from "./assistant/briefing.js";
 import { runAssistantTui } from "./assistant/assistant-tui.js";
+import { getAssistantUserState } from "./assistant/store.js";
+import { readAssistantWorkspaceMemory } from "./assistant/workspace.js";
 import { runChatSession } from "./chat/chat-session.js";
 import { createCliUi, runWithSpinner, writeHero, type CliRow, type CliTone } from "./cli-ui.js";
 import { loadConfig } from "./config/load-config.js";
@@ -15,6 +18,7 @@ import { createDeterministicPlan } from "./planner/deterministic-planner.js";
 import { diagnoseProvider } from "./providers/provider-diagnostics.js";
 import { routeTask } from "./router/model-router.js";
 import { scanRepository } from "./scanner/repo-scanner.js";
+import { runAssistantEval } from "./evals/assistant-eval-runner.js";
 import { enforceSecretgateBoundary, inspectSecretgateBoundary } from "./security/secretgate-boundary.js";
 import { runBootstrap } from "./setup/bootstrap.js";
 import { runOllamaSetup } from "./setup/ollama-setup.js";
@@ -599,6 +603,11 @@ function helpText(ui?: ReturnType<typeof createCliUi>): string {
   ];
   const chatLines = ['chat ["<prompt>"] [--root PATH] [--config PATH] [--json]'];
   const assistantLines = ['assistant-tui ["<prompt>"] [--root PATH] [--config PATH] [--json] [--chat-id ID]'];
+  const assistantToolLines = [
+    "assistant-brief [--root PATH] [--config PATH] [--json] [--chat-id ID] [--mode brief|today|review|inbox]",
+    "assistant-memory [--root PATH] [--config PATH] [--json] [--chat-id ID]",
+    "assistant-eval [--root PATH] [--config PATH] [--json] [--model MODEL] [--runtime local|remote] [--results-dir PATH]"
+  ];
   const runLines = [
     "scan [--root PATH] [--config PATH] [--json]",
     'plan "<task>" [--root PATH] [--config PATH] [--json]',
@@ -645,6 +654,9 @@ function helpText(ui?: ReturnType<typeof createCliUi>): string {
       "Assistant TUI:",
       ...assistantLines.map((line) => `  ${line}`),
       "",
+      "Assistant Tools:",
+      ...assistantToolLines.map((line) => `  ${line}`),
+      "",
       "Task Runs:",
       ...runLines.map((line) => `  ${line}`),
       "",
@@ -660,6 +672,7 @@ function helpText(ui?: ReturnType<typeof createCliUi>): string {
     renderSection(ui, "Setup", ui.renderList(setupLines, "strong")),
     renderSection(ui, "Live Chat", ui.renderList(chatLines, "strong")),
     renderSection(ui, "Assistant TUI", ui.renderList(assistantLines, "strong")),
+    renderSection(ui, "Assistant Tools", ui.renderList(assistantToolLines, "strong")),
     renderSection(ui, "Task Runs", ui.renderList(runLines, "strong")),
     renderSection(ui, "Always-On Agent", ui.renderList(agentLines, "strong")),
     renderSection(ui, "Examples", ui.renderList(examples, "secondary"))
@@ -962,6 +975,93 @@ async function main(): Promise<void> {
     if (!process.stdin.isTTY || initialPrompt.length > 0) {
       process.stdout.write(`${decorate ? renderAssistantTuiRich(ui, result) : formatAssistantTuiResult(result)}\n`);
     }
+    return;
+  }
+
+  if (parsed.command === "assistant-brief") {
+    const chatId = getFlag(parsed.flags, "chat-id") ?? "local-tui";
+    const modeFlag = getFlag(parsed.flags, "mode") ?? "brief";
+    const mode =
+      modeFlag === "today" || modeFlag === "review" || modeFlag === "inbox" || modeFlag === "brief"
+        ? modeFlag
+        : "brief";
+    const user = await getAssistantUserState(root, config, chatId);
+    const briefing = await buildAssistantBriefing({
+      root,
+      config,
+      chatId,
+      user,
+      mode
+    });
+
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify({ chatId, mode, briefing }, null, 2)}\n`
+        : `${briefing}\n`
+    );
+    return;
+  }
+
+  if (parsed.command === "assistant-memory") {
+    const chatId = getFlag(parsed.flags, "chat-id") ?? "local-tui";
+    const user = await getAssistantUserState(root, config, chatId);
+    const workspaceMemory = await readAssistantWorkspaceMemory(root, config, chatId);
+    const payload = {
+      chatId,
+      memories: user?.memories ?? [],
+      workspaceMemory
+    };
+
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(payload, null, 2)}\n`
+        : [
+            `Chat ID: ${chatId}`,
+            "",
+            "Curated Memories:",
+            ...(payload.memories.length > 0
+              ? payload.memories.map((memory) => `- ${memory.id.slice(-8)} [${memory.kind}] ${memory.text}`)
+              : ["- none"]),
+            "",
+            "Workspace Memory:",
+            workspaceMemory
+          ].join("\n") + "\n"
+    );
+    return;
+  }
+
+  if (parsed.command === "assistant-eval") {
+    const modelProfile = getFlag(parsed.flags, "model") ?? config.assistant.replyModel ?? config.profiles.planner;
+    const runtimeFlag = getFlag(parsed.flags, "runtime") ?? config.runtime.mode;
+    const runtimeMode = runtimeFlag === "remote" ? "remote" : "local";
+    const resultsDir = path.resolve(
+      root,
+      getFlag(parsed.flags, "results-dir") ?? ".micro-claw/evals/assistant"
+    );
+    const result = await runAssistantEval({
+      resultsDir,
+      modelProfile,
+      runtimeMode,
+      config
+    });
+
+    process.stdout.write(
+      jsonOutput
+        ? `${JSON.stringify(result, null, 2)}\n`
+        : [
+            `Assistant eval ${result.id}`,
+            `Model: ${result.modelProfile}`,
+            `Runtime: ${result.runtimeMode}`,
+            `Pass rate: ${(result.summary.passRate * 100).toFixed(1)}%`,
+            `Results: ${result.resultsDir}`,
+            "",
+            ...result.taskResults.map((task) =>
+              `${task.passed ? "PASS" : "FAIL"} ${task.taskId} (${task.durationMs}ms)${
+                task.missingPatterns.length > 0 ? ` missing: ${task.missingPatterns.join(", ")}` : ""
+              }`
+            )
+          ].join("\n") + "\n"
+    );
     return;
   }
 

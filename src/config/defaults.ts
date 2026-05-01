@@ -64,7 +64,14 @@ export const defaultConfig: MicroClawConfig = {
     recentConversationMessages: 8,
     maxNotesPerUser: 50,
     maxTodosPerUser: 50,
-    maxRemindersPerUser: 50
+    maxRemindersPerUser: 50,
+    maxCuratedMemoriesPerUser: 80,
+    enableMemoryCuration: true,
+    enableProactiveBriefings: true,
+    replyModel: undefined,
+    memoryModel: undefined,
+    briefingModel: undefined,
+    repoDelegationModel: undefined
   },
   telegram: {
     enabled: true,

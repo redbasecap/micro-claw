@@ -14,22 +14,27 @@ export { runBootstrap } from "./setup/bootstrap.js";
 export { parseBaseModelFromModelfileSource, runOllamaSetup } from "./setup/ollama-setup.js";
 export { createSkillScaffold } from "./skills/skill-scaffold.js";
 export { generateDailyAssistantReply } from "./assistant/daily-reply.js";
+export { buildAssistantBriefing } from "./assistant/briefing.js";
+export { handleAssistantCommand, parseAssistantCommand } from "./assistant/commands.js";
 export { runAssistantTui } from "./assistant/assistant-tui.js";
 export { parseReminderRequest } from "./assistant/reminder-parser.js";
 export {
-  addAssistantNote,
-  addAssistantReminder,
-  addAssistantTodo,
-  appendAssistantConversation,
-  completeAssistantTodo,
+	  addAssistantNote,
+	  addAssistantMemory,
+	  addAssistantReminder,
+	  addAssistantTodo,
+	  appendAssistantConversation,
+	  completeAssistantTodo,
+	  forgetAssistantMemory,
   formatAssistantUserContext,
   getAssistantStateFiles,
   getAssistantUserState,
   listDueAssistantReminders,
   loadAssistantState,
   markAssistantReminderDelivered,
-  touchAssistantUser
+	  touchAssistantUser
 } from "./assistant/store.js";
+export { runAssistantEval } from "./evals/assistant-eval-runner.js";
 export { ToolExecutor } from "./tools/tool-executor.js";
 export { runTelegramService } from "./telegram/telegram-service.js";
 export { runVerification, discoverVerificationCommands } from "./verifier/verification-runner.js";

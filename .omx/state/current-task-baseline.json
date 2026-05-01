@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "branch_name": "main",
+      "worktree_path": "/Users/nick/development/TEMP/micro-claw",
+      "status": "active",
+      "created_at": "2026-05-01T23:20:25.878Z",
+      "updated_at": "2026-05-01T23:20:25.878Z"
+    }
+  ]
+}

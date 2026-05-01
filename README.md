@@ -281,7 +281,12 @@ Supported Telegram commands:
 - `/whoami`
 - `/workspace`
 - `/memory`
+- `/brief`
+- `/today`
+- `/review`
+- `/inbox`
 - `/remember <text>`
+- `/forget <id-prefix>`
 - `/note <text>`
 - `/notes`
 - `/todo <text>`
@@ -300,6 +305,13 @@ Supported Telegram commands:
 
 Every other text message is answered through the configured model path, while repo- and execution-focused requests can still flow into the existing Micro Claw repo assistant behavior.
 Scheduled tasks run through that same assistant path and can message the originating chat back on the next Telegram service cycle.
+
+The assistant now keeps two memory layers per chat:
+
+- manual workspace memory in `CLAUDE.md`,
+- curated memory entries in `memories.md`, with stable ids that can be removed with `/forget`.
+
+Daily-life replies use the smallest configured assistant model by default. Repo or file automation still delegates to the coding/tool loop when the prompt asks for code, files, shell commands, tests, or builds.
 
 ## Assistant TUI
 
@@ -321,7 +333,12 @@ The local assistant supports the same slash commands as the Telegram assistant:
 - `/status`
 - `/workspace`
 - `/memory`
+- `/brief`
+- `/today`
+- `/review`
+- `/inbox`
 - `/remember <text>`
+- `/forget <id-prefix>`
 - `/note <text>`
 - `/todo <text>`
 - `/remind ...`
@@ -333,6 +350,15 @@ You can also run a single terminal prompt without entering the interactive loop:
 
 ```bash
 micro-claw assistant-tui "what should I remember?"
+```
+
+You can inspect assistant state without entering a chat loop:
+
+```bash
+micro-claw assistant-brief --chat-id local-tui
+micro-claw assistant-brief --chat-id local-tui --mode today
+micro-claw assistant-memory --chat-id local-tui --json
+micro-claw assistant-eval --model qwen3:4b
 ```
 
 ## Chat Mode

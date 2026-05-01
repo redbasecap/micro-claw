@@ -95,6 +95,13 @@ export interface MicroClawConfig {
     maxNotesPerUser: number;
     maxTodosPerUser: number;
     maxRemindersPerUser: number;
+    maxCuratedMemoriesPerUser: number;
+    enableMemoryCuration: boolean;
+    enableProactiveBriefings: boolean;
+    replyModel?: string;
+    memoryModel?: string;
+    briefingModel?: string;
+    repoDelegationModel?: string;
   };
   telegram: {
     enabled: boolean;
@@ -331,6 +338,19 @@ export interface AssistantReminder {
   deliveredAt?: string;
 }
 
+export type AssistantMemoryKind = "fact" | "preference" | "routine" | "project" | "other";
+
+export interface AssistantMemoryEntry {
+  id: string;
+  kind: AssistantMemoryKind;
+  text: string;
+  source: "manual" | "curated" | "imported";
+  confidence: number;
+  createdAt: string;
+  lastUsedAt?: string;
+  expiresAt?: string;
+}
+
 export interface AssistantConversationMessage {
   role: "user" | "assistant";
   content: string;
@@ -347,6 +367,7 @@ export interface AssistantUserState {
   notes: AssistantNote[];
   todos: AssistantTodo[];
   reminders: AssistantReminder[];
+  memories: AssistantMemoryEntry[];
   conversation: AssistantConversationMessage[];
 }
 

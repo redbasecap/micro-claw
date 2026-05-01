@@ -23,6 +23,7 @@ import {
   getAssistantWorkspacePaths,
   readAssistantWorkspaceMemory
 } from "../assistant/workspace.js";
+import { handleAssistantCommand } from "../assistant/commands.js";
 import { generateDailyAssistantReply } from "../assistant/daily-reply.js";
 import { writeHeartbeat } from "../heartbeat/heartbeat-service.js";
 import { assertWithinRoot, pathExists, toErrorMessage, truncate } from "../core/utils.js";
@@ -231,142 +232,27 @@ async function handleTelegramCommand(options: {
   message: TelegramMessage;
   user: AssistantUserState | undefined;
 }): Promise<boolean> {
-  const parsed = parseCommand(options.message.text ?? "");
-  if (!parsed) {
+  const chatId = String(options.message.chat.id);
+  const result = await handleAssistantCommand({
+    root: options.root,
+    config: options.config,
+    chatId,
+    line: options.message.text ?? "",
+    user: options.user,
+    allowExit: false
+  });
+
+  if (!result.handled) {
     return false;
   }
 
-  const chatId = String(options.message.chat.id);
-  let reply: string | undefined;
-
-  switch (parsed.command) {
-    case "start":
-    case "help":
-      reply = formatTelegramHelp();
-      break;
-    case "whoami":
-      reply = `Chat ID: ${chatId}\nDisplay Name: ${formatDisplayName(options.message)}\nUsername: ${options.message.from?.username ?? "unknown"}`;
-      break;
-    case "status": {
-      const schedules = await listAssistantScheduledTasks(options.root, options.config, chatId);
-      reply = [
-        `Notes: ${options.user?.notes.length ?? 0}`,
-        `Open todos: ${options.user?.todos.filter((todo) => !todo.completedAt).length ?? 0}`,
-        `Pending reminders: ${options.user?.reminders.filter((reminder) => !reminder.deliveredAt).length ?? 0}`,
-        `Scheduled tasks: ${schedules.length}`
-      ].join("\n");
-      break;
-    }
-    case "workspace":
-      reply = formatWorkspaceSummary(options.root, options.config, chatId);
-      break;
-    case "memory":
-      reply = truncate(await readAssistantWorkspaceMemory(options.root, options.config, chatId), 3_500);
-      break;
-    case "remember":
-      if (!parsed.args) {
-        reply = "Usage: /remember <text>";
-        break;
-      }
-      if (!options.user) {
-        reply = "Chat workspace is not ready yet.";
-        break;
-      }
-      await appendAssistantWorkspaceMemory(options.root, options.config, options.user, parsed.args);
-      reply = "Saved to chat memory.";
-      break;
-    case "note":
-      if (!parsed.args) {
-        reply = "Usage: /note <text>";
-        break;
-      }
-      await addAssistantNote(options.root, options.config, chatId, parsed.args);
-      reply = "Note saved.";
-      break;
-    case "notes":
-      reply = formatNotes(await getAssistantUserState(options.root, options.config, chatId));
-      break;
-    case "todo":
-      if (!parsed.args) {
-        reply = "Usage: /todo <text>";
-        break;
-      }
-      await addAssistantTodo(options.root, options.config, chatId, parsed.args);
-      reply = "Todo added.";
-      break;
-    case "todos":
-      reply = formatTodos(await getAssistantUserState(options.root, options.config, chatId));
-      break;
-    case "done": {
-      if (!parsed.args) {
-        reply = "Usage: /done <id-prefix>";
-        break;
-      }
-      const completed = await completeAssistantTodo(options.root, options.config, chatId, parsed.args);
-      reply = completed ? `Completed todo ${completed.id.slice(0, 8)}.` : "No matching open todo found.";
-      break;
-    }
-    case "remind":
-      if (!parsed.args) {
-        reply = "Usage: /remind in 2h buy milk";
-        break;
-      }
-      try {
-        const reminder = parseReminderRequest(parsed.args);
-        await addAssistantReminder(options.root, options.config, chatId, reminder);
-        reply = `Reminder saved for ${formatReminderDate(reminder.dueAt)}.`;
-      } catch (error) {
-        reply = toErrorMessage(error);
-      }
-      break;
-    case "reminders":
-      reply = formatReminders(await getAssistantUserState(options.root, options.config, chatId));
-      break;
-    case "schedule":
-      if (!parsed.args) {
-        reply = "Usage: /schedule every 2h | stretch";
-        break;
-      }
-      try {
-        const scheduled = parseAssistantScheduleRequest(parsed.args);
-        const task = await addAssistantScheduledTask(options.root, options.config, chatId, scheduled);
-        reply = [
-          `Scheduled task ${task.id.slice(0, 8)}.`,
-          `Pattern: ${formatAssistantSchedule(task.schedule)}`,
-          `Next run: ${formatReminderDate(task.nextRunAt)}`
-        ].join("\n");
-      } catch (error) {
-        reply = toErrorMessage(error);
-      }
-      break;
-    case "schedules":
-      reply = formatAssistantScheduledTaskList(
-        await listAssistantScheduledTasks(options.root, options.config, chatId)
-      );
-      break;
-    case "unschedule":
-      if (!parsed.args) {
-        reply = "Usage: /unschedule <id-prefix>";
-        break;
-      }
-      try {
-        const removed = await removeAssistantScheduledTask(options.root, options.config, chatId, parsed.args);
-        reply = removed ? `Removed schedule ${removed.id.slice(0, 8)}.` : "No matching schedule found.";
-      } catch (error) {
-        reply = toErrorMessage(error);
-      }
-      break;
-    default:
-      return false;
-  }
-
-  if (reply) {
+  if (result.reply) {
     await sendAndPersistAssistantReply({
       root: options.root,
       config: options.config,
       client: options.client,
       chatId,
-      reply
+      reply: result.reply
     });
   }
 

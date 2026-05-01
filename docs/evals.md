@@ -118,6 +118,24 @@ Pass criteria:
 - remote mode uses materially less RAM than local inference mode,
 - memory growth stays bounded over repeated tasks.
 
+### 7. Always-On Assistant Behavior
+
+Tasks:
+
+- generate briefings from todos, reminders, schedules, and memory,
+- recall durable curated memories,
+- expose removable memory ids,
+- report due inbox work without sending duplicate notifications.
+
+Pass criteria:
+
+- `/brief`, `/today`, `/review`, and `/inbox` return structured, useful summaries,
+- curated memories are visible and removable by id prefix,
+- command behavior is shared between Telegram and TUI,
+- assistant eval artifacts are written under `.micro-claw/evals/assistant/`.
+
+HyperAgents-style self-improvement should consume these assistant eval artifacts from a disposable worktree or external lab repo. Do not point a reset/clean-based evolution loop at the main Micro Claw working tree.
+
 ## Quality Signals To Record
 
 - task success or failure,
@@ -139,6 +157,7 @@ Every release should compare at least:
 - balanced plus max fallback,
 - local mode versus remote minimum-RAM mode,
 - chat-only mode versus tool-using mode.
+- assistant command behavior across small local assistant profiles.
 
 This will show whether the architecture is actually improving outcomes.
 

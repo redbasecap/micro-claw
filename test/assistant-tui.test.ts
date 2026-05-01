@@ -141,14 +141,17 @@ describe("runAssistantTui", () => {
       }
     });
 
-    expect(second.lastAssistantMessage).toBe("Remember Friday gym.");
-    expect(secondCapture.read()).toContain("thinking");
-    expect(tagRequests).toBe(3);
-    expect(requestedModels).toEqual(["micro-claw-planner:latest"]);
-    expect(
-      await readFile(path.join(root, ".micro-claw", "assistant", "chats", "local-tui", "CLAUDE.md"), "utf8")
-    ).toContain("Friday gym");
-  });
+	    expect(second.lastAssistantMessage).toBe("Remember Friday gym.");
+	    expect(secondCapture.read()).toContain("thinking");
+	    expect(tagRequests).toBe(3);
+	    expect(requestedModels).toEqual(["micro-claw-planner:latest", "micro-claw-planner:latest"]);
+	    expect(
+	      await readFile(path.join(root, ".micro-claw", "assistant", "chats", "local-tui", "CLAUDE.md"), "utf8")
+	    ).toContain("Friday gym");
+	    expect(
+	      await readFile(path.join(root, ".micro-claw", "assistant", "chats", "local-tui", "memories.md"), "utf8")
+	    ).toContain("Friday gym");
+	  });
 
   test("creates local schedules from slash commands", async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), "micro-claw-assistant-tui-schedule-"));
@@ -192,7 +195,77 @@ describe("runAssistantTui", () => {
       tasks: Array<{ chatId: string; prompt: string }>;
     };
     expect(schedules.tasks).toHaveLength(1);
-    expect(schedules.tasks[0].chatId).toBe("local-tui");
-    expect(schedules.tasks[0].prompt).toBe("stretch");
-  });
-});
+	    expect(schedules.tasks[0].chatId).toBe("local-tui");
+	    expect(schedules.tasks[0].prompt).toBe("stretch");
+	  });
+
+	  test("renders briefings and forgets curated memories from shared commands", async () => {
+	    const root = await mkdtemp(path.join(os.tmpdir(), "micro-claw-assistant-tui-brief-"));
+	    tempDirs.push(root);
+
+	    await writeFile(
+	      path.join(root, "package.json"),
+	      JSON.stringify(
+	        {
+	          name: "fixture",
+	          private: true
+	        },
+	        null,
+	        2
+	      ),
+	      "utf8"
+	    );
+	    await saveAgentProfile(root, {
+	      name: "Clawy",
+	      behavior: "brief and practical"
+	    });
+
+	    const config = structuredClone(defaultConfig);
+	    config.assistant.enableMemoryCuration = false;
+
+	    const remember = await runAssistantTui({
+	      root,
+	      config,
+	      initialPrompt: "/remember Friday gym",
+	      interactive: false,
+	      output: createCaptureWritable().sink,
+	      env: {
+	        https_proxy: "http://127.0.0.1:8083",
+	        SSL_CERT_FILE: "/tmp/secretgate-ca.pem"
+	      }
+	    });
+	    expect(remember.lastAssistantMessage).toBe("Saved to chat memory.");
+
+	    const memoryState = JSON.parse(
+	      await readFile(path.join(root, ".micro-claw", "assistant", "state.json"), "utf8")
+	    ) as { users: Record<string, { memories: Array<{ id: string; text: string }> }> };
+	    const memoryId = memoryState.users["local-tui"].memories[0].id.slice(-8);
+
+	    const brief = await runAssistantTui({
+	      root,
+	      config,
+	      initialPrompt: "/brief",
+	      interactive: false,
+	      output: createCaptureWritable().sink,
+	      env: {
+	        https_proxy: "http://127.0.0.1:8083",
+	        SSL_CERT_FILE: "/tmp/secretgate-ca.pem"
+	      }
+	    });
+	    expect(brief.lastAssistantMessage).toContain("# Brief");
+	    expect(brief.lastAssistantMessage).toContain("Friday gym");
+
+	    const forget = await runAssistantTui({
+	      root,
+	      config,
+	      initialPrompt: `/forget ${memoryId}`,
+	      interactive: false,
+	      output: createCaptureWritable().sink,
+	      env: {
+	        https_proxy: "http://127.0.0.1:8083",
+	        SSL_CERT_FILE: "/tmp/secretgate-ca.pem"
+	      }
+	    });
+	    expect(forget.lastAssistantMessage).toContain("Forgot memory");
+	  });
+	});

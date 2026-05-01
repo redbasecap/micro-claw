@@ -450,7 +450,8 @@ function autoLearnFromTask(
           description: extractCommandPurpose(cmd),
           successRate: success ? 0.8 : 0.3,
           lastUsed: new Date().toISOString(),
-          learnedFrom: task
+          learnedFrom: task,
+          useCount: 1
         });
       }
     }

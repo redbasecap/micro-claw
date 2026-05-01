@@ -1,10 +1,10 @@
 import { Writable } from "node:stream";
-import type { AssistantUserState, ChatMessage, MicroClawConfig, ProviderKind } from "../core/types.js";
+import type { AssistantMemoryKind, AssistantUserState, ChatMessage, MicroClawConfig, ProviderKind } from "../core/types.js";
 import { resolveAgentProfile } from "../agent/agent-profile.js";
 import { runChatSession } from "../chat/chat-session.js";
 import { requestChatCompletion, listOllamaModels, resolveOllamaModel } from "../providers/chat-provider.js";
 import { truncate } from "../core/utils.js";
-import { formatAssistantUserContext } from "./store.js";
+import { addAssistantMemory, formatAssistantUserContext } from "./store.js";
 import { readAssistantWorkspaceMemory } from "./workspace.js";
 
 function createSilentWritable(): Writable {
@@ -50,16 +50,41 @@ async function resolveAssistantReplyTarget(config: MicroClawConfig): Promise<{
   if (config.runtime.mode === "remote") {
     return {
       providerKind: config.provider.kind,
-      model: config.provider.model
+      model: config.assistant.replyModel || config.provider.model
     };
   }
 
   return {
     providerKind: "ollama",
-    model: await resolveModel(config, config.profiles.planner, "ollama", {
-      configuredModel: "qwen3:4b",
+    model: await resolveModel(config, config.assistant.replyModel || config.profiles.planner, "ollama", {
+      configuredModel: config.assistant.replyModel ?? "qwen3:4b",
       preference: "smallest"
     })
+  };
+}
+
+async function resolveAssistantMemoryTarget(config: MicroClawConfig): Promise<{
+  providerKind: ProviderKind;
+  model: string;
+}> {
+  if (config.runtime.mode === "remote") {
+    return {
+      providerKind: config.provider.kind,
+      model: config.assistant.memoryModel || config.assistant.replyModel || config.provider.model
+    };
+  }
+
+  return {
+    providerKind: "ollama",
+    model: await resolveModel(
+      config,
+      config.assistant.memoryModel || config.assistant.replyModel || config.profiles.planner,
+      "ollama",
+      {
+        configuredModel: config.assistant.memoryModel ?? config.assistant.replyModel ?? "qwen3:4b",
+        preference: "smallest"
+      }
+    )
   };
 }
 
@@ -112,6 +137,108 @@ function buildDailyMessages(
       ].join("\n")
     }
   ];
+}
+
+function parseMemoryKind(value: unknown): AssistantMemoryKind {
+  switch (value) {
+    case "fact":
+    case "preference":
+    case "routine":
+    case "project":
+    case "other":
+      return value;
+    default:
+      return "other";
+  }
+}
+
+function extractJsonObject(source: string): unknown {
+  const trimmed = source.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    const start = trimmed.indexOf("{");
+    const end = trimmed.lastIndexOf("}");
+    if (start >= 0 && end > start) {
+      return JSON.parse(trimmed.slice(start, end + 1));
+    }
+  }
+
+  return undefined;
+}
+
+async function curateAssistantMemory(options: {
+  root: string;
+  config: MicroClawConfig;
+  chatId: string;
+  user?: AssistantUserState;
+  userInput: string;
+  assistantReply: string;
+  workspaceMemory: string;
+}): Promise<void> {
+  if (!options.config.assistant.enableMemoryCuration) {
+    return;
+  }
+
+  const target = await resolveAssistantMemoryTarget(options.config);
+  const completion = await requestChatCompletion({
+    config: options.config,
+    providerKind: target.providerKind,
+    model: target.model,
+    messages: [
+      {
+        role: "system",
+        content: [
+          "Extract only durable assistant memory from the latest user turn.",
+          "Return JSON only with this shape:",
+          '{"memories":[{"text":"short durable fact","kind":"fact|preference|routine|project|other","confidence":0.0}]}',
+          "Use an empty memories array when nothing stable should be remembered.",
+          "Do not store one-off small talk, transient commands, or sensitive secrets."
+        ].join("\n")
+      },
+      {
+        role: "user",
+        content: [
+          "Existing workspace memory:",
+          truncate(options.workspaceMemory, 1_500),
+          "",
+          "Persistent user context:",
+          formatAssistantUserContext(options.user, options.config.assistant.recentConversationMessages),
+          "",
+          "Latest user message:",
+          options.userInput,
+          "",
+          "Assistant reply:",
+          truncate(options.assistantReply, 1_200)
+        ].join("\n")
+      }
+    ],
+    stream: false
+  });
+
+  const parsed = extractJsonObject(completion.content) as
+    | { memories?: Array<{ text?: unknown; kind?: unknown; confidence?: unknown }> }
+    | undefined;
+  if (!parsed || !Array.isArray(parsed.memories)) {
+    return;
+  }
+
+  for (const item of parsed.memories.slice(0, 3)) {
+    if (typeof item.text !== "string" || !item.text.trim()) {
+      continue;
+    }
+
+    await addAssistantMemory(options.root, options.config, options.chatId, {
+      text: item.text,
+      kind: parseMemoryKind(item.kind),
+      source: "curated",
+      confidence: typeof item.confidence === "number" ? item.confidence : 0.65
+    });
+  }
 }
 
 export async function generateDailyAssistantReply(options: {
@@ -172,5 +299,23 @@ export async function generateDailyAssistantReply(options: {
     onToken: options.onToken
   });
 
-  return completion.content.trim() || "I could not produce a useful reply.";
+  const reply = completion.content.trim() || "I could not produce a useful reply.";
+
+  if (source === "user") {
+    try {
+      await curateAssistantMemory({
+        root: options.root,
+        config: options.config,
+        chatId: options.chatId,
+        user: options.user,
+        userInput: options.userInput,
+        assistantReply: reply,
+        workspaceMemory
+      });
+    } catch (error) {
+      await options.onProgress?.(`memory curation skipped: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  return reply;
 }

@@ -37,6 +37,7 @@ import { formatReminderDate, parseReminderRequest } from "./reminder-parser.js";
 import { computeNextAssistantScheduleRun, formatAssistantSchedule, parseAssistantScheduleRequest } from "./schedule-parser.js";
 import { appendAssistantWorkspaceMemory, getAssistantWorkspacePaths, readAssistantWorkspaceMemory } from "./workspace.js";
 import { generateDailyAssistantReply } from "./daily-reply.js";
+import { handleAssistantCommand } from "./commands.js";
 
 const DEFAULT_CHAT_ID = "local-tui";
 
@@ -280,128 +281,24 @@ async function handleCommand(options: {
   state: AssistantTuiState;
   line: string;
 }): Promise<string | "exit"> {
-  const parsed = parseCommand(options.line);
-  if (!parsed) {
-    throw new Error("Not a command.");
+  const result = await handleAssistantCommand({
+    root: options.root,
+    config: options.config,
+    chatId: options.state.chatId,
+    line: options.line,
+    user: options.state.user,
+    allowExit: true
+  });
+
+  if (result.user) {
+    options.state.user = result.user;
   }
 
-  switch (parsed.command) {
-    case "help":
-      return formatHelp();
-    case "whoami":
-      return `Chat ID: ${options.state.chatId}\nDisplay Name: ${options.state.user.displayName ?? "unknown"}\nUsername: ${options.state.user.username ?? "unknown"}`;
-    case "status": {
-      const schedules = await listAssistantScheduledTasks(options.root, options.config, options.state.chatId);
-      return [
-        `Notes: ${options.state.user.notes.length}`,
-        `Open todos: ${options.state.user.todos.filter((todo) => !todo.completedAt).length}`,
-        `Pending reminders: ${options.state.user.reminders.filter((reminder) => !reminder.deliveredAt).length}`,
-        `Scheduled tasks: ${schedules.length}`
-      ].join("\n");
-    }
-    case "workspace":
-      return formatWorkspaceSummary(options.root, options.config, options.state.chatId);
-    case "memory":
-      return truncate(await readAssistantWorkspaceMemory(options.root, options.config, options.state.chatId), 3_500);
-    case "remember":
-      if (!parsed.args) {
-        return "Usage: /remember <text>";
-      }
-      await appendAssistantWorkspaceMemory(options.root, options.config, options.state.user, parsed.args);
-      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
-      return "Saved to chat memory.";
-    case "note":
-      if (!parsed.args) {
-        return "Usage: /note <text>";
-      }
-      await addAssistantNote(options.root, options.config, options.state.chatId, parsed.args);
-      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
-      return "Note saved.";
-    case "notes":
-      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
-      return formatNotes(options.state.user);
-    case "todo":
-      if (!parsed.args) {
-        return "Usage: /todo <text>";
-      }
-      await addAssistantTodo(options.root, options.config, options.state.chatId, parsed.args);
-      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
-      return "Todo added.";
-    case "todos":
-      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
-      return formatTodos(options.state.user);
-    case "done": {
-      if (!parsed.args) {
-        return "Usage: /done <id-prefix>";
-      }
-      const completed = await completeAssistantTodo(
-        options.root,
-        options.config,
-        options.state.chatId,
-        parsed.args
-      );
-      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
-      return completed ? `Completed todo ${completed.id.slice(0, 8)}.` : "No matching open todo found.";
-    }
-    case "remind":
-      if (!parsed.args) {
-        return "Usage: /remind in 2h buy milk";
-      }
-      try {
-        const reminder = parseReminderRequest(parsed.args);
-        await addAssistantReminder(options.root, options.config, options.state.chatId, reminder);
-        options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
-        return `Reminder saved for ${formatReminderDate(reminder.dueAt)}.`;
-      } catch (error) {
-        return toErrorMessage(error);
-      }
-    case "reminders":
-      options.state.user = await refreshUser(options.root, options.config, options.state.chatId);
-      return formatReminders(options.state.user);
-    case "schedule":
-      if (!parsed.args) {
-        return "Usage: /schedule every 2h | stretch";
-      }
-      try {
-        const scheduled = parseAssistantScheduleRequest(parsed.args);
-        const task = await addAssistantScheduledTask(
-          options.root,
-          options.config,
-          options.state.chatId,
-          scheduled
-        );
-        return [
-          `Scheduled task ${task.id.slice(0, 8)}.`,
-          `Pattern: ${formatAssistantSchedule(task.schedule)}`,
-          `Next run: ${formatReminderDate(task.nextRunAt)}`
-        ].join("\n");
-      } catch (error) {
-        return toErrorMessage(error);
-      }
-    case "schedules":
-      return formatAssistantScheduledTaskList(
-        await listAssistantScheduledTasks(options.root, options.config, options.state.chatId)
-      );
-    case "unschedule":
-      if (!parsed.args) {
-        return "Usage: /unschedule <id-prefix>";
-      }
-      try {
-        const removed = await removeAssistantScheduledTask(
-          options.root,
-          options.config,
-          options.state.chatId,
-          parsed.args
-        );
-        return removed ? `Removed schedule ${removed.id.slice(0, 8)}.` : "No matching schedule found.";
-      } catch (error) {
-        return toErrorMessage(error);
-      }
-    case "exit":
-      return "exit";
-    default:
-      return "Unknown command. Type /help.";
+  if (result.exit) {
+    return "exit";
   }
+
+  return result.handled ? result.reply ?? "" : "Unknown command. Type /help.";
 }
 
 export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<AssistantTuiResult> {
