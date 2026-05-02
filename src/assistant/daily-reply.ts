@@ -1,9 +1,17 @@
 import { Writable } from "node:stream";
-import type { AssistantMemoryKind, AssistantUserState, ChatMessage, MicroClawConfig, ProviderKind } from "../core/types.js";
+import type {
+  AssistantMemoryKind,
+  AssistantUserState,
+  ChatMessage,
+  MicroClawConfig,
+  ProviderKind,
+  ShellCommandResult
+} from "../core/types.js";
 import { resolveAgentProfile } from "../agent/agent-profile.js";
 import { runChatSession } from "../chat/chat-session.js";
 import { requestChatCompletion, listOllamaModels, resolveOllamaModel } from "../providers/chat-provider.js";
 import { truncate } from "../core/utils.js";
+import { ToolExecutor } from "../tools/tool-executor.js";
 import { addAssistantMemory, formatAssistantUserContext } from "./store.js";
 import { readAssistantWorkspaceMemory } from "./workspace.js";
 
@@ -16,11 +24,94 @@ function createSilentWritable(): Writable {
 }
 
 function shouldRouteToRepoAssistant(userInput: string): boolean {
+  const asksAboutLocalCommand =
+    /\b(version|installed|available|path|where|which)\b/i.test(userInput) &&
+    /\b(homebrew|brew|node|npm|pnpm|python|python3|git|ollama|llama|llama-server|cargo|rust|go|uv)\b/i.test(userInput);
+
   return (
+    asksAboutLocalCommand ||
     /\b(create|make|write|edit|change|update|delete|remove|fix|run|execute|install|test|build|compile|curl|mkdir|grep|rg|ls|pwd)\b/i.test(
       userInput
     ) ||
     /\b(repo|repository|code|file|files|src|docs|readme|package\.json|tsconfig|git)\b/i.test(userInput)
+  );
+}
+
+interface LocalCommandQuestion {
+  command: string;
+  label: string;
+  kind: "path" | "version";
+}
+
+function detectLocalCommandQuestion(userInput: string): LocalCommandQuestion | undefined {
+  const wantsVersion =
+    /\b(version|installed|available)\b/i.test(userInput) || /\bwhich\s+version\b/i.test(userInput);
+  const wantsPath = /\b(where|path)\b/i.test(userInput) || (/\bwhich\b/i.test(userInput) && !wantsVersion);
+  if (!wantsVersion && !wantsPath) {
+    return undefined;
+  }
+
+  const tools = [
+    { pattern: /\b(homebrew|brew)\b/i, label: "Homebrew", binary: "brew", version: "brew --version" },
+    { pattern: /\bnode\b/i, label: "Node.js", binary: "node", version: "node --version" },
+    { pattern: /\bnpm\b/i, label: "npm", binary: "npm", version: "npm --version" },
+    { pattern: /\bpnpm\b/i, label: "pnpm", binary: "pnpm", version: "pnpm --version" },
+    { pattern: /\bpython3\b/i, label: "Python 3", binary: "python3", version: "python3 --version" },
+    { pattern: /\bpython\b/i, label: "Python", binary: "python", version: "python --version" },
+    { pattern: /\bgit\b/i, label: "Git", binary: "git", version: "git --version" },
+    { pattern: /\bollama\b/i, label: "Ollama", binary: "ollama", version: "ollama --version" },
+    { pattern: /\bllama-server\b/i, label: "llama-server", binary: "llama-server", version: "llama-server --version" },
+    { pattern: /\buv\b/i, label: "uv", binary: "uv", version: "uv --version" },
+    { pattern: /\bcargo\b/i, label: "Cargo", binary: "cargo", version: "cargo --version" },
+    { pattern: /\brust\b/i, label: "Rust", binary: "rustc", version: "rustc --version" },
+    { pattern: /\bgo\b/i, label: "Go", binary: "go", version: "go version" }
+  ] as const;
+
+  const tool = tools.find((candidate) => candidate.pattern.test(userInput));
+  if (!tool) {
+    return undefined;
+  }
+
+  return {
+    command: wantsPath ? `command -v ${tool.binary}` : tool.version,
+    label: tool.label,
+    kind: wantsPath ? "path" : "version"
+  };
+}
+
+async function answerLocalCommandQuestion(options: {
+  root: string;
+  config: MicroClawConfig;
+  userInput: string;
+  onProgress?: (message: string) => void | Promise<void>;
+}): Promise<string | undefined> {
+  const question = detectLocalCommandQuestion(options.userInput);
+  if (!question) {
+    return undefined;
+  }
+
+  await options.onProgress?.(`running ${question.command}`);
+  const executor = new ToolExecutor(options.root, options.config);
+  const result = await executor.execute({
+    tool: "shell",
+    input: {
+      command: question.command
+    }
+  });
+
+  const shellResult = result.data as ShellCommandResult | undefined;
+  const output = [shellResult?.stdout.trim(), shellResult?.stderr.trim()].filter(Boolean).join("\n");
+  const noun = question.kind === "path" ? "path" : "version";
+
+  if (!result.ok || shellResult?.exitCode !== 0) {
+    return [
+      `I ran \`${question.command}\`, but I could not read the ${question.label} ${noun}.`,
+      output ? `\n${truncate(output, 600)}` : result.error ? `\n${result.error}` : ""
+    ].join("");
+  }
+
+  return [`${question.label} ${noun}:`, truncate(output || "(no output)", 600), "", `Command: \`${question.command}\``].join(
+    "\n"
   );
 }
 
@@ -255,6 +346,10 @@ export async function generateDailyAssistantReply(options: {
   env?: NodeJS.ProcessEnv;
 }): Promise<string> {
   const source = options.source ?? "user";
+  const localCommandReply = await answerLocalCommandQuestion(options);
+  if (localCommandReply) {
+    return localCommandReply;
+  }
 
   if (shouldRouteToRepoAssistant(options.userInput)) {
     await options.onProgress?.("delegating to the repo assistant");

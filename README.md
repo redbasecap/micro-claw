@@ -361,6 +361,30 @@ micro-claw assistant-memory --chat-id local-tui --json
 micro-claw assistant-eval --model qwen3:4b
 ```
 
+## Local LLM Quick Runs
+
+Run the assistant on a small Ollama model:
+
+```bash
+pnpm local:ollama -- --model qwen3:4b --prompt "/brief"
+```
+
+Run it against a GGUF model through llama.cpp:
+
+```bash
+pnpm local:llamacpp -- --gguf ~/models/your-mini-model.Q4_K_M.gguf --prompt "/brief"
+```
+
+The llama.cpp launcher keeps server logs under `.micro-claw/logs/` by default; add `--verbose-server` when you want to see raw llama.cpp timing and slot logs in the terminal.
+
+Package the latest assistant eval for the external HyperAgents-Locally lab:
+
+```bash
+pnpm hyperagents:package -- --clone --model ollama/qwen3:4b
+```
+
+See [docs/local-llm-hyperagents.md](./docs/local-llm-hyperagents.md) for the full local Ollama, llama.cpp/GGUF, and HyperAgents-Locally workflow.
+
 ## Chat Mode
 
 Micro Claw now has an interactive REPL:
@@ -437,6 +461,7 @@ Inside chat, slash commands are available:
 - [docs/model-strategy.md](./docs/model-strategy.md): model profiles for 32 GB hardware and routing rules.
 - [docs/runtime-modes.md](./docs/runtime-modes.md): local mode versus minimum-RAM API mode.
 - [docs/evals.md](./docs/evals.md): how to prove the agent is actually useful.
+- [docs/local-llm-hyperagents.md](./docs/local-llm-hyperagents.md): one-command Ollama, llama.cpp/GGUF, and HyperAgents-Locally workflows.
 - [docs/roadmap.md](./docs/roadmap.md): staged build plan.
 - [examples/planner.Modelfile](./examples/planner.Modelfile): example planner profile for Ollama.
 - [examples/coder.Modelfile](./examples/coder.Modelfile): example coder profile for Ollama.

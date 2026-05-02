@@ -17,6 +17,9 @@
     "telegram:start": "tsx src/cli.ts telegram-start",
     "ollama:setup": "tsx src/cli.ts ollama-setup",
     "one-click": "node ./scripts/micro-claw-one-click.mjs",
+    "local:ollama": "NODE_OPTIONS= node ./scripts/run-local-llm.mjs --provider ollama",
+    "local:llamacpp": "NODE_OPTIONS= node ./scripts/run-local-llm.mjs --provider llamacpp",
+    "hyperagents:package": "NODE_OPTIONS= node ./scripts/hyperagents-local-package.mjs",
     "test": "vitest run"
   },
   "dependencies": {

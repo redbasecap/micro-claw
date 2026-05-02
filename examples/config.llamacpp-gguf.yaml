@@ -1,0 +1,29 @@
+runtime:
+  mode: remote
+  stream: false
+
+provider:
+  kind: openai-compatible
+  model: local-gguf
+  base_url: http://127.0.0.1:8080/v1/chat/completions
+  api_key_env: LLAMACPP_API_KEY
+
+profiles:
+  planner: local-gguf
+  coder: local-gguf
+  fallback: local-gguf
+
+assistant:
+  enabled: true
+  reply_model: local-gguf
+  memory_model: local-gguf
+  briefing_model: local-gguf
+  repo_delegation_model: local-gguf
+  enable_memory_curation: true
+  enable_proactive_briefings: true
+
+security:
+  require_secretgate: false
+
+telegram:
+  enabled: true

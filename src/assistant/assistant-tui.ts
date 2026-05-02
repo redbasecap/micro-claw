@@ -498,9 +498,9 @@ export async function runAssistantTui(options: RunAssistantTuiOptions): Promise<
 
     if (!options.jsonMode) {
       if (canStream) {
-        output.write(streamedAnyToken ? "\n" : `${reply}\n`);
+        output.write(streamedAnyToken ? "\n" : `${ui.formatAssistantReply(reply)}\n`);
       } else {
-        output.write(`${reply}\n`);
+        output.write(`${ui.formatAssistantReply(reply)}\n`);
       }
     }
 

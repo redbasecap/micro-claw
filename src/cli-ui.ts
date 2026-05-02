@@ -189,6 +189,7 @@ export interface CliUi {
   renderCommandHeader: (title: string, subtitle?: string) => string;
   formatProgress: (message: string) => string;
   formatAgent: (message: string, tone?: CliTone) => string;
+  formatAssistantReply: (message: string) => string;
   prompt: (label: string) => string;
 }
 
@@ -270,6 +271,19 @@ export function createCliUi(output?: Writable, env: NodeJS.ProcessEnv = process.
       }
 
       return `${paint("secondary", "agent")} ${dim(">")} ${paint(tone, message)}`;
+    },
+    formatAssistantReply(message: string): string {
+      if (!decorated) {
+        return `assistant> ${message}`;
+      }
+
+      const lines = message.trimEnd().split("\n");
+      const prefix = `${paint("secondary", "assistant")} ${dim(">")} `;
+      const padding = dim(" ".repeat("assistant > ".length));
+
+      return lines
+        .map((line, index) => `${index === 0 ? prefix : padding}${paint("success", line)}`)
+        .join("\n");
     },
     prompt(label: string): string {
       if (!decorated) {

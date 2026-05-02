@@ -1,0 +1,28 @@
+runtime:
+  mode: local
+  stream: true
+
+provider:
+  kind: ollama
+  model: qwen3:4b
+  ollama_host: http://127.0.0.1:11434
+
+profiles:
+  planner: qwen3:4b
+  coder: qwen3:4b
+  fallback: qwen3:4b
+
+assistant:
+  enabled: true
+  reply_model: qwen3:4b
+  memory_model: qwen3:4b
+  briefing_model: qwen3:4b
+  repo_delegation_model: qwen3:4b
+  enable_memory_curation: true
+  enable_proactive_briefings: true
+
+security:
+  require_secretgate: false
+
+telegram:
+  enabled: true
